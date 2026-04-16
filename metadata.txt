@@ -1,0 +1,17 @@
+[general]
+name=Patchify
+qgisMinimumVersion=3.0
+description=Crop large satellite/aerial images into patches for deep learning dataset generation
+version=0.1.0
+author=Salar Ghaffarian
+email=salarghaffarian1363@gmail.com
+about=Patchify is a QGIS plugin for generating deep learning datasets from large satellite or aerial images. It crops images into small patches using a sliding window, applies data augmentation (rotation and flipping), and splits the result into Train, Test, and Validation datasets. Supports optional paired mask/label image patching for both binary and multi-class semantic segmentation workflows.
+tracker=https://github.com/salarghaffarian/Patchify/issues
+repository=https://github.com/salarghaffarian/Patchify
+homepage=https://github.com/salarghaffarian/Patchify
+tags=raster, patch, deep learning, machine learning, semantic segmentation, augmentation, dataset, satellite, aerial
+category=Raster
+icon=crop_icon.png
+experimental=True
+deprecated=False
+hasProcessingProvider=no
