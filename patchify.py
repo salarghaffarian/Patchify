@@ -1,11 +1,10 @@
 import cv2
 from PyQt5.QtWidgets import (
-    QCheckBox, QMainWindow, QApplication, QLabel, QPushButton,
-    QFileDialog, QLineEdit, QToolButton, QRadioButton, QMessageBox,
-    QGroupBox, QWidget, QGridLayout
+    QAction, QApplication, QCheckBox, QDialog, QFileDialog, QGridLayout,
+    QGroupBox, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QRadioButton, QToolButton, QWidget
 )
-from PyQt5 import QtGui
-import sys
+from PyQt5.QtGui import QIcon
 import math
 import os
 import shutil
@@ -13,26 +12,55 @@ import random
 from augment import augment
 
 
-class UI(QMainWindow):
-    def __init__(self):
-        super(UI, self).__init__()
+# -----------------------------------------------------------------------------
+# Plugin entry point
+# -----------------------------------------------------------------------------
+
+class PatchifyPlugin:
+    def __init__(self, iface):
+        self.iface  = iface
+        self.action = None
+        self.dialog = None
+
+    def initGui(self):
+        icon = QIcon(os.path.join(os.path.dirname(__file__), 'crop_icon.png'))
+        self.action = QAction(icon, 'Patchify', self.iface.mainWindow())
+        self.action.triggered.connect(self.run)
+        self.iface.addToolBarIcon(self.action)
+        self.iface.addPluginToRasterMenu('Patchify', self.action)
+
+    def unload(self):
+        self.iface.removePluginRasterMenu('Patchify', self.action)
+        self.iface.removeToolBarIcon(self.action)
+
+    def run(self):
+        if self.dialog is None:
+            self.dialog = PatchifyDialog(self.iface.mainWindow())
+        self.dialog.show()
+        self.dialog.raise_()
+        self.dialog.activateWindow()
+
+
+# -----------------------------------------------------------------------------
+# Main dialog
+# -----------------------------------------------------------------------------
+
+class PatchifyDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
 
         # --- Window Setup ---
-        self.setWindowTitle('Patchify App')
-        self.setWindowIcon(QtGui.QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crop_icon.png')))
+        self.setWindowTitle('Patchify')
+        self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), 'crop_icon.png')))
         self.setFixedSize(700, 600)
 
-        # --- Central Widget (absolute positioning) ---
-        central = QWidget()
-        self.setCentralWidget(central)
-
         # --- Title Label ---
-        title_label = QLabel('Patchify App', central)
+        title_label = QLabel('Patchify App', self)
         title_label.setGeometry(10, 0, 311, 61)
         title_label.setStyleSheet('font: 16pt "Segoe Print";')
 
         # --- Input / Export / Mask Section ---
-        io_widget = QWidget(central)
+        io_widget = QWidget(self)
         io_widget.setGeometry(30, 70, 641, 110)
         io_layout = QGridLayout(io_widget)
         io_layout.setContentsMargins(0, 0, 0, 0)
@@ -58,18 +86,18 @@ class UI(QMainWindow):
         self.btn_mask.setText('...')
         self.btn_mask.setEnabled(False)
 
-        io_layout.addWidget(label_input,               0, 0)
-        io_layout.addWidget(self.lineEdit_input,        0, 1)
-        io_layout.addWidget(self.btn_input,             0, 2)
-        io_layout.addWidget(label_export,               1, 0)
-        io_layout.addWidget(self.lineEdit_export,       1, 1)
-        io_layout.addWidget(self.btn_export,            1, 2)
-        io_layout.addWidget(self.check_mask_enabled,    2, 0)
-        io_layout.addWidget(self.lineEdit_mask,         2, 1)
-        io_layout.addWidget(self.btn_mask,              2, 2)
+        io_layout.addWidget(label_input,             0, 0)
+        io_layout.addWidget(self.lineEdit_input,     0, 1)
+        io_layout.addWidget(self.btn_input,          0, 2)
+        io_layout.addWidget(label_export,            1, 0)
+        io_layout.addWidget(self.lineEdit_export,    1, 1)
+        io_layout.addWidget(self.btn_export,         1, 2)
+        io_layout.addWidget(self.check_mask_enabled, 2, 0)
+        io_layout.addWidget(self.lineEdit_mask,      2, 1)
+        io_layout.addWidget(self.btn_mask,           2, 2)
 
         # --- Cropping Parameters GroupBox ---
-        gb_crop = QGroupBox('Cropping Parameters:', central)
+        gb_crop = QGroupBox('Cropping Parameters:', self)
         gb_crop.setGeometry(30, 200, 310, 141)
 
         QLabel('Window Size:', gb_crop).setGeometry(40, 40, 81, 16)
@@ -89,7 +117,7 @@ class UI(QMainWindow):
         self.lineEdit_stridey.setGeometry(220, 80, 41, 20)
 
         # --- Output Options GroupBox ---
-        gb_output = QGroupBox('Output Options:', central)
+        gb_output = QGroupBox('Output Options:', self)
         gb_output.setGeometry(360, 200, 310, 141)
 
         QLabel('Output name:', gb_output).setGeometry(40, 25, 71, 16)
@@ -109,7 +137,7 @@ class UI(QMainWindow):
         self.lineEdit_valid.setGeometry(190, 110, 71, 20)
 
         # --- Augmentation Options GroupBox ---
-        gb_aug = QGroupBox('Augmentation Options:', central)
+        gb_aug = QGroupBox('Augmentation Options:', self)
         gb_aug.setGeometry(30, 350, 641, 131)
         aug_layout = QGridLayout(gb_aug)
 
@@ -134,13 +162,13 @@ class UI(QMainWindow):
         aug_layout.addWidget(self.check_flipvh,    3, 3)
 
         # --- Progress Label ---
-        self.progress_label = QLabel('Patchify is waiting for orders!', central)
+        self.progress_label = QLabel('Patchify is waiting for orders!', self)
         self.progress_label.setGeometry(30, 495, 351, 16)
 
         # --- Action Buttons ---
-        self.btn_start = QPushButton('Start Patching', central)
+        self.btn_start = QPushButton('Start Patching', self)
         self.btn_start.setGeometry(450, 540, 100, 30)
-        self.btn_cancel = QPushButton('Cancel', central)
+        self.btn_cancel = QPushButton('Cancel', self)
         self.btn_cancel.setGeometry(560, 540, 100, 30)
 
         # --- Signals & Slots ---
@@ -158,52 +186,44 @@ class UI(QMainWindow):
         self.allChecked()
 
         # Default values
-        self.Train_val = 0
-        self.Test_val  = 0
-        self.Valid_val = 0
+        self.Train_val       = 0
+        self.Test_val        = 0
+        self.Valid_val       = 0
         self.list_of_saved_names = []
-        self.mask_filename = None
+        self.mask_filename   = None
         self.maskNamePassifix = None
-
-        self.show()
 
     # -------------------------------------------------------------------------
     # Slot Functions
     # -------------------------------------------------------------------------
 
     def allChecked(self):
-        '''Makes all augmentation checkboxes checked and disabled.'''
         for cb in [self.check_original, self.check_rotate90, self.check_rotate180,
                    self.check_rotate270, self.check_flipv, self.check_fliph, self.check_flipvh]:
             cb.setChecked(True)
             cb.setEnabled(False)
 
     def customChecked(self):
-        '''Unchecks all augmentation checkboxes and enables them for manual selection.'''
         for cb in [self.check_original, self.check_rotate90, self.check_rotate180,
                    self.check_rotate270, self.check_flipv, self.check_fliph, self.check_flipvh]:
             cb.setChecked(False)
             cb.setEnabled(True)
 
     def pickImage(self):
-        '''Opens a file dialog to select the input image.'''
         self.image_filename, _ = QFileDialog.getOpenFileName(
             self, "Select an Image", "",
             "tif file (*.tif);;png file (*.png);;jpg file (*.jpg)"
         )
         if self.image_filename:
             self.imageNamePassifix = self.image_filename.split(".")[-1]
-            self.imageName = self.image_filename.split("/")[-1].split(".")[0]
             self.lineEdit_input.setText(self.image_filename)
 
     def pickSavingFolder(self):
-        '''Opens a folder dialog to select the export directory.'''
         self.saving_folder_name = QFileDialog.getExistingDirectory(self, "Select a Folder", "")
         if self.saving_folder_name:
             self.lineEdit_export.setText(self.saving_folder_name)
 
     def toggleMaskInput(self, checked):
-        '''Enables or disables the mask image input row.'''
         self.lineEdit_mask.setEnabled(checked)
         self.btn_mask.setEnabled(checked)
         if not checked:
@@ -211,13 +231,12 @@ class UI(QMainWindow):
             self.mask_filename = None
 
     def pickMaskImage(self):
-        '''Opens a file dialog to select the mask/label image.'''
         filename, _ = QFileDialog.getOpenFileName(
             self, "Select a Mask / Label Image", "",
             "tif file (*.tif);;png file (*.png);;jpg file (*.jpg)"
         )
         if filename:
-            self.mask_filename = filename
+            self.mask_filename    = filename
             self.maskNamePassifix = filename.split(".")[-1]
             self.lineEdit_mask.setText(filename)
 
@@ -226,7 +245,6 @@ class UI(QMainWindow):
     # -------------------------------------------------------------------------
 
     def check_for_mandatory_fillings(self, field_name):
-        '''Shows an error popup for an unfilled mandatory field.'''
         msg = QMessageBox()
         msg.setWindowTitle('Incomplete form!')
         msg.setText(f"{field_name} has been left unfilled!")
@@ -234,7 +252,6 @@ class UI(QMainWindow):
         msg.exec_()
 
     def popupIncorrect(self, message):
-        '''Shows an error popup for an incorrect value.'''
         msg = QMessageBox()
         msg.setWindowTitle('Incorrect data!')
         msg.setText(message)
@@ -242,7 +259,6 @@ class UI(QMainWindow):
         msg.exec_()
 
     def popupIncorrectValue(self):
-        '''Shows an error popup for invalid Train/Test/Validation percentages.'''
         msg = QMessageBox()
         msg.setWindowTitle('Incorrect data insertion!')
         msg.setText(
@@ -254,7 +270,6 @@ class UI(QMainWindow):
         msg.exec_()
 
     def popupIncorrectCharacterInsersion(self, name):
-        '''Shows an error popup when a non-integer value is entered.'''
         msg = QMessageBox()
         msg.setWindowTitle('Incorrect data insertion!')
         msg.setText(f"{name} must be a positive integer.")
@@ -280,8 +295,8 @@ class UI(QMainWindow):
 
         # (2) Validate window size and stride fields
         for field, name in [
-            (self.lineEdit_winx,   'Window Size X'),
-            (self.lineEdit_winy,   'Window Size Y'),
+            (self.lineEdit_winx,    'Window Size X'),
+            (self.lineEdit_winy,    'Window Size Y'),
             (self.lineEdit_stridex, 'Stride X'),
             (self.lineEdit_stridey, 'Stride Y'),
         ]:
@@ -296,22 +311,17 @@ class UI(QMainWindow):
             return
 
         # (4) Image dimensions
-        self.dim = self.image.ndim
-        if self.dim == 2:
+        if self.image.ndim == 2:
             self.Height, self.Width = self.image.shape[:2]
             self.channel = 1
         else:
             self.Height, self.Width, self.channel = self.image.shape[:3]
-
-        print(f"Image Height >> {self.Height}\nImage Width  >> {self.Width}")
 
         # (5) Patch size and stride
         self.patchSize_x = int(self.lineEdit_winx.text())
         self.patchSize_y = int(self.lineEdit_winy.text())
         self.patchStep_x = int(self.lineEdit_stridex.text())
         self.patchStep_y = int(self.lineEdit_stridey.text())
-
-        print(f"Patch Size X >> {self.patchSize_x}\nPatch Size Y >> {self.patchSize_y}")
 
         # (6) Collect selected augmentation methods
         self.selected_augment_methods = set()
@@ -346,8 +356,6 @@ class UI(QMainWindow):
                     self.popupIncorrectCharacterInsersion(name)
                     return
 
-        print(f"Train: {self.Train_val}  Test: {self.Test_val}  Valid: {self.Valid_val}")
-
         total_pct = self.Train_val + self.Test_val + self.Valid_val
         if total_pct != 100 and total_pct != 0:
             self.popupIncorrectValue()
@@ -355,7 +363,7 @@ class UI(QMainWindow):
 
         # (8) Optionally read and validate mask image
         mask_enabled = self.check_mask_enabled.isChecked()
-        mask_image = None
+        mask_image   = None
         if mask_enabled:
             if not self.lineEdit_mask.text():
                 self.check_for_mandatory_fillings("Mask / Label Image")
@@ -371,7 +379,7 @@ class UI(QMainWindow):
                 )
                 return
 
-        # (9) Create Total output folder (with images/ masks/ subdirs when mask is enabled)
+        # (9) Create Total output folder
         self.total_path = os.path.join(self.saving_folder_name, "Total")
         os.mkdir(self.total_path)
         if mask_enabled:
@@ -408,18 +416,11 @@ class UI(QMainWindow):
                 x1 = col * self.patchStep_x
                 x2 = x1 + self.patchSize_x
 
-                if self.channel == 1:
-                    crop_image = self.image[y1:y2, x1:x2]
-                else:
-                    crop_image = self.image[y1:y2, x1:x2, :]
-
+                crop_image = self.image[y1:y2, x1:x2] if self.channel == 1 else self.image[y1:y2, x1:x2, :]
                 augment_list = augment(crop_image)
 
                 if mask_enabled:
-                    if mask_image.ndim == 2:
-                        crop_mask = mask_image[y1:y2, x1:x2]
-                    else:
-                        crop_mask = mask_image[y1:y2, x1:x2, :]
+                    crop_mask = mask_image[y1:y2, x1:x2] if mask_image.ndim == 2 else mask_image[y1:y2, x1:x2, :]
                     mask_augment_list = augment(crop_mask)
 
                 for aug_idx in self.selected_augment_methods:
@@ -452,9 +453,8 @@ class UI(QMainWindow):
         QApplication.processEvents()
 
     def _split_dataset(self, mask_enabled, total_img_path, total_mask_path):
-        '''Shuffles and splits the total patches into Train, Test, Validation folders.'''
 
-        randomized = self.list_of_saved_names.copy()
+        randomized   = self.list_of_saved_names.copy()
         random.shuffle(randomized)
         total_number = len(randomized)
 
@@ -462,11 +462,9 @@ class UI(QMainWindow):
         if self.Train_val == 0:
             num_train = 0
             if self.Test_val == 0:
-                num_test  = 0
-                num_valid = total_number
+                num_test, num_valid = 0, total_number
             elif self.Valid_val == 0:
-                num_test  = total_number
-                num_valid = 0
+                num_test, num_valid = total_number, 0
             else:
                 num_test  = math.floor((self.Test_val / 100) * total_number)
                 num_valid = total_number - num_test
@@ -474,8 +472,7 @@ class UI(QMainWindow):
         elif self.Test_val == 0:
             num_test = 0
             if self.Valid_val == 0:
-                num_train = total_number
-                num_valid = 0
+                num_train, num_valid = total_number, 0
             else:
                 num_train = math.floor((self.Train_val / 100) * total_number)
                 num_valid = total_number - num_train
@@ -486,13 +483,13 @@ class UI(QMainWindow):
             num_test  = total_number - num_train
 
         else:
-            num_train = math.floor((self.Train_val / 100) * total_number)
+            num_train    = math.floor((self.Train_val / 100) * total_number)
             what_is_left = total_number - num_train
-            num_test  = math.floor((self.Test_val / (self.Test_val + self.Valid_val)) * what_is_left)
-            num_valid = what_is_left - num_test
+            num_test     = math.floor((self.Test_val / (self.Test_val + self.Valid_val)) * what_is_left)
+            num_valid    = what_is_left - num_test
 
-        # Build split directory paths, creating images/ and masks/ subdirs when mask is enabled
-        splits = [("Train", num_train), ("Test", num_test), ("Validation", num_valid)]
+        # Create split directories
+        splits          = [("Train", num_train), ("Test", num_test), ("Validation", num_valid)]
         split_img_paths  = {}
         split_mask_paths = {}
 
@@ -510,9 +507,8 @@ class UI(QMainWindow):
                 else:
                     split_img_paths[split_name] = split_root
 
-        # Copy files into each split directory
+        # Copy files
         saved_count = 0
-
         for split_name, count in splits:
             if count == 0:
                 continue
@@ -521,23 +517,11 @@ class UI(QMainWindow):
 
             for _ in range(count):
                 img_name = randomized.pop(0)
-                shutil.copy2(
-                    os.path.join(total_img_path, img_name),
-                    os.path.join(img_dest, img_name)
-                )
+                shutil.copy2(os.path.join(total_img_path, img_name), os.path.join(img_dest, img_name))
                 if mask_enabled:
                     mask_name = img_name.rsplit(".", 1)[0] + "." + self.maskNamePassifix
-                    shutil.copy2(
-                        os.path.join(total_mask_path, mask_name),
-                        os.path.join(mask_dest, mask_name)
-                    )
+                    shutil.copy2(os.path.join(total_mask_path, mask_name), os.path.join(mask_dest, mask_name))
                 saved_count += 1
                 percent = math.floor(saved_count / total_number * 100)
                 self.progress_label.setText(f'Dataset split: {percent}% completed')
                 QApplication.processEvents()
-
-
-# Initialize The App
-app = QApplication(sys.argv)
-UIWindow = UI()
-app.exec_()
