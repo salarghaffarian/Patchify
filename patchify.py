@@ -1,12 +1,12 @@
-# Importing the requited python libraries:
-
 import cv2
-from PyQt5.QtWidgets import QCheckBox, QMainWindow, QApplication, QLabel, QPushButton, QFileDialog, QProgressBar, QLineEdit, QToolButton, QRadioButton, QMessageBox
-from PyQt5 import uic
+from PyQt5.QtWidgets import (
+    QCheckBox, QMainWindow, QApplication, QLabel, QPushButton,
+    QFileDialog, QLineEdit, QToolButton, QRadioButton, QMessageBox,
+    QGroupBox, QWidget, QGridLayout
+)
 from PyQt5 import QtGui
 import sys
 import math
-import time
 import os
 import shutil
 import random
@@ -17,444 +17,437 @@ class UI(QMainWindow):
     def __init__(self):
         super(UI, self).__init__()
 
-
-        # Load the ui file
-        uic.loadUi("Patchify.ui", self)
-
-        # Set Main Window Title and Icon:
+        # --- Window Setup ---
         self.setWindowTitle('Patchify App')
-        self.setWindowIcon(QtGui.QIcon('crop_icon.png'))
+        self.setWindowIcon(QtGui.QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crop_icon.png')))
+        self.setFixedSize(700, 600)
 
-        # Define the created widgets from ui file into python file.
-        # (1) MainWindow;
-        self.window_main = self.findChild(QMainWindow, 'PatchifyApp')
+        # --- Central Widget (absolute positioning) ---
+        central = QWidget()
+        self.setCentralWidget(central)
 
+        # --- Title Label ---
+        title_label = QLabel('Patchify App', central)
+        title_label.setGeometry(10, 0, 311, 61)
+        title_label.setStyleSheet('font: 16pt "Segoe Print";')
 
-        # (2) PushButtons:
-        self.btn_start = self.findChild(QPushButton, 'pushButton_1')
-        self.btn_cancel = self.findChild(QPushButton, 'pushButton_2')
+        # --- Input / Export Section ---
+        io_widget = QWidget(central)
+        io_widget.setGeometry(30, 70, 641, 81)
+        io_layout = QGridLayout(io_widget)
+        io_layout.setContentsMargins(0, 0, 0, 0)
 
+        label_input = QLabel('   Input Image      ')
+        label_input.setStyleSheet('font: 10pt "Microsoft JhengHei UI";')
+        self.lineEdit_input = QLineEdit()
+        self.btn_input = QToolButton()
+        self.btn_input.setText('...')
 
-        # (3)  ToolButtons:
-        self.btn_input = self.findChild(QToolButton, 'toolButton_1')
-        self.btn_export = self.findChild(QToolButton, 'toolButton_2')
+        label_export = QLabel('Export Folder     ')
+        label_export.setStyleSheet('font: 10pt "Microsoft JhengHei UI";')
+        self.lineEdit_export = QLineEdit()
+        self.btn_export = QToolButton()
+        self.btn_export.setText('...')
 
+        io_layout.addWidget(label_input,          0, 0)
+        io_layout.addWidget(self.lineEdit_input,  0, 1)
+        io_layout.addWidget(self.btn_input,       0, 2)
+        io_layout.addWidget(label_export,         1, 0)
+        io_layout.addWidget(self.lineEdit_export, 1, 1)
+        io_layout.addWidget(self.btn_export,      1, 2)
 
-        # (4)  Labels:
-        self.progress_label = self.findChild(QLabel, 'label')
-        self.progress_label.setText('Patchify is waiting for orders!')
+        # --- Cropping Parameters GroupBox ---
+        gb_crop = QGroupBox('Cropping Parameters:', central)
+        gb_crop.setGeometry(30, 170, 310, 141)
 
+        QLabel('Window Size:', gb_crop).setGeometry(40, 40, 81, 16)
+        QLabel('X', gb_crop).setGeometry(120, 40, 16, 16)
+        self.lineEdit_winx = QLineEdit(gb_crop)
+        self.lineEdit_winx.setGeometry(140, 40, 41, 20)
+        QLabel('Y', gb_crop).setGeometry(200, 40, 16, 16)
+        self.lineEdit_winy = QLineEdit(gb_crop)
+        self.lineEdit_winy.setGeometry(220, 40, 41, 20)
 
-        # (5)  lineEdits:
-        self.lineEdit_input = self.findChild(QLineEdit, 'lineEdit_1')
-        self.lineEdit_export = self.findChild(QLineEdit, 'lineEdit_2')
-        self.lineEdit_winx = self.findChild(QLineEdit, 'lineEdit_3')
-        self.lineEdit_winy = self.findChild(QLineEdit, 'lineEdit_4')
-        self.lineEdit_stridex = self.findChild(QLineEdit, 'lineEdit_5')
-        self.lineEdit_stridey = self.findChild(QLineEdit, 'lineEdit_6')
-        self.lineEdit_outname = self.findChild(QLineEdit, 'lineEdit_7')
-        self.lineEdit_train = self.findChild(QLineEdit, 'lineEdit_8')
-        self.lineEdit_test = self.findChild(QLineEdit, 'lineEdit_9')
-        self.lineEdit_valid = self.findChild(QLineEdit, 'lineEdit_10')
+        QLabel('Stride:', gb_crop).setGeometry(70, 80, 41, 16)
+        QLabel('X', gb_crop).setGeometry(120, 80, 16, 16)
+        self.lineEdit_stridex = QLineEdit(gb_crop)
+        self.lineEdit_stridex.setGeometry(140, 80, 41, 20)
+        QLabel('Y', gb_crop).setGeometry(200, 80, 16, 16)
+        self.lineEdit_stridey = QLineEdit(gb_crop)
+        self.lineEdit_stridey.setGeometry(220, 80, 41, 20)
 
+        # --- Output Options GroupBox ---
+        gb_output = QGroupBox('Output Options:', central)
+        gb_output.setGeometry(360, 170, 310, 141)
 
-        # (6)  RadioButtons:
-        self.radio_all = self.findChild(QRadioButton, 'radioButton_1')
-        self.radio_custom = self.findChild(QRadioButton, 'radioButton_2')
-        
+        QLabel('Output name:', gb_output).setGeometry(40, 25, 71, 16)
+        self.lineEdit_outname = QLineEdit(gb_output)
+        self.lineEdit_outname.setGeometry(120, 25, 141, 20)
 
-        # (7)  CheckBoxes:
-        self.check_original = self.findChild(QCheckBox, 'checkBox_1')
-        self.check_rotate90 = self.findChild(QCheckBox, 'checkBox_2')
-        self.check_rotate180 = self.findChild(QCheckBox, 'checkBox_3')
-        self.check_rotate270 = self.findChild(QCheckBox, 'checkBox_4')
-        self.check_flipv = self.findChild(QCheckBox, 'checkBox_5')
-        self.check_fliph = self.findChild(QCheckBox, 'checkBox_6')
-        self.check_flipvh = self.findChild(QCheckBox, 'checkBox_7')
-        
+        QLabel('Training Percentage', gb_output).setGeometry(40, 60, 111, 16)
+        self.lineEdit_train = QLineEdit(gb_output)
+        self.lineEdit_train.setGeometry(190, 60, 71, 20)
 
-        # Define Signal and Slots:
+        QLabel('Testing Percentage', gb_output).setGeometry(40, 85, 111, 16)
+        self.lineEdit_test = QLineEdit(gb_output)
+        self.lineEdit_test.setGeometry(190, 85, 71, 20)
+
+        QLabel('Validation Percentage', gb_output).setGeometry(40, 110, 111, 16)
+        self.lineEdit_valid = QLineEdit(gb_output)
+        self.lineEdit_valid.setGeometry(190, 110, 71, 20)
+
+        # --- Augmentation Options GroupBox ---
+        gb_aug = QGroupBox('Augmentation Options:', central)
+        gb_aug.setGeometry(30, 320, 641, 131)
+        aug_layout = QGridLayout(gb_aug)
+
+        self.radio_all    = QRadioButton('All')
+        self.radio_custom = QRadioButton('Custom Selection')
+        self.check_original  = QCheckBox('Original Image')
+        self.check_rotate90  = QCheckBox('Rotate 90 degrees')
+        self.check_rotate180 = QCheckBox('Rotate 180 degrees')
+        self.check_rotate270 = QCheckBox('Rotate 270 degrees')
+        self.check_flipv     = QCheckBox('Flip Vertically')
+        self.check_fliph     = QCheckBox('Flip Horizontally')
+        self.check_flipvh    = QCheckBox('Flip Vertically and Horizontally')
+
+        aug_layout.addWidget(self.radio_all,       0, 0)
+        aug_layout.addWidget(self.radio_custom,    1, 0)
+        aug_layout.addWidget(self.check_original,  0, 2)
+        aug_layout.addWidget(self.check_rotate90,  1, 2)
+        aug_layout.addWidget(self.check_rotate180, 2, 2)
+        aug_layout.addWidget(self.check_rotate270, 3, 2)
+        aug_layout.addWidget(self.check_flipv,     1, 3)
+        aug_layout.addWidget(self.check_fliph,     2, 3)
+        aug_layout.addWidget(self.check_flipvh,    3, 3)
+
+        # --- Progress Label ---
+        self.progress_label = QLabel('Patchify is waiting for orders!', central)
+        self.progress_label.setGeometry(30, 460, 351, 16)
+
+        # --- Action Buttons ---
+        self.btn_start = QPushButton('Start Patching', central)
+        self.btn_start.setGeometry(450, 510, 100, 30)
+        self.btn_cancel = QPushButton('Cancel', central)
+        self.btn_cancel.setGeometry(560, 510, 100, 30)
+
+        # --- Signals & Slots ---
         self.radio_all.toggled.connect(self.allChecked)
         self.radio_custom.toggled.connect(self.customChecked)
-        self.btn_cancel.clicked.connect(self.exitApp)
+        self.btn_cancel.clicked.connect(self.close)
         self.btn_input.clicked.connect(self.pickImage)
         self.btn_export.clicked.connect(self.pickSavingFolder)
         self.btn_start.clicked.connect(self.patchifying)
 
-        # Make the radioButton for all the augmentation methods on by default.
+        # Default augmentation state
         self.radio_all.setChecked(True)
         self.allChecked()
 
-
-        # Define Default values
+        # Default values
         self.Train_val = 0
-        self.Test_val = 0
+        self.Test_val  = 0
         self.Valid_val = 0
         self.list_of_saved_names = []
 
-        # Show the App
         self.show()
 
-    # Slot functions:
-    def allChecked(self):
-        '''This function makes all the checkBoxes checked! and makes them disabled for being checked by the user.'''
-        # Make all checked:
-        self.check_original.setChecked(True)
-        self.check_rotate90.setChecked(True)
-        self.check_rotate180.setChecked(True)
-        self.check_rotate270.setChecked(True)
-        self.check_flipv.setChecked(True)
-        self.check_fliph.setChecked(True)
-        self.check_flipvh.setChecked(True)
-        # Make all disabled:
-        self.check_original.setEnabled (False)
-        self.check_rotate90.setEnabled (False)
-        self.check_rotate180.setEnabled (False)
-        self.check_rotate270.setEnabled (False)
-        self.check_flipv.setEnabled (False)
-        self.check_fliph.setEnabled (False)
-        self.check_flipvh.setEnabled (False)
+    # -------------------------------------------------------------------------
+    # Slot Functions
+    # -------------------------------------------------------------------------
 
+    def allChecked(self):
+        '''Makes all augmentation checkboxes checked and disabled.'''
+        for cb in [self.check_original, self.check_rotate90, self.check_rotate180,
+                   self.check_rotate270, self.check_flipv, self.check_fliph, self.check_flipvh]:
+            cb.setChecked(True)
+            cb.setEnabled(False)
 
     def customChecked(self):
-        '''This function makes all the checkBoxes unchecked! and makes them Enabled for being checked by the user.'''
-        # Make all checked:
-        self.check_original.setChecked(False)
-        self.check_rotate90.setChecked(False)
-        self.check_rotate180.setChecked(False)
-        self.check_rotate270.setChecked(False)
-        self.check_flipv.setChecked(False)
-        self.check_fliph.setChecked(False)
-        self.check_flipvh.setChecked(False)
-        # Make all disabled:
-        self.check_original.setEnabled (True)
-        self.check_rotate90.setEnabled (True)
-        self.check_rotate180.setEnabled (True)
-        self.check_rotate270.setEnabled (True)
-        self.check_flipv.setEnabled (True)
-        self.check_fliph.setEnabled (True)
-        self.check_flipvh.setEnabled (True)
-
-    def exitApp(self):
-        '''This function is for exiting the App.'''
-        sys.exit()
+        '''Unchecks all augmentation checkboxes and enables them for manual selection.'''
+        for cb in [self.check_original, self.check_rotate90, self.check_rotate180,
+                   self.check_rotate270, self.check_flipv, self.check_fliph, self.check_flipvh]:
+            cb.setChecked(False)
+            cb.setEnabled(True)
 
     def pickImage(self):
-        '''This function picks and image by using a openDialogFileName.'''
-        self.image_filename, _ = QFileDialog.getOpenFileName(self, "Select an Image", "C://", "tif file (*.tif);;png file (*.png);;jpg file (*.jpg)")
-        self.imageNamePassifix = self.image_filename.split(".")[-1]
-        self.imageName = self.image_filename.split("/")[-1].split(".")[0]
-        
-
+        '''Opens a file dialog to select the input image.'''
+        self.image_filename, _ = QFileDialog.getOpenFileName(
+            self, "Select an Image", "",
+            "tif file (*.tif);;png file (*.png);;jpg file (*.jpg)"
+        )
         if self.image_filename:
+            self.imageNamePassifix = self.image_filename.split(".")[-1]
+            self.imageName = self.image_filename.split("/")[-1].split(".")[0]
             self.lineEdit_input.setText(self.image_filename)
-        
 
     def pickSavingFolder(self):
+        '''Opens a folder dialog to select the export directory.'''
         self.saving_folder_name = QFileDialog.getExistingDirectory(self, "Select a Folder", "")
-        
         if self.saving_folder_name:
             self.lineEdit_export.setText(self.saving_folder_name)
-    # ************************************************************************************************************
-    def check_for_mandatory_fillings(self, filed_name):
-        ''' This function check if the mandatory filds are filled or not! and if not it opens an messageBox!
-        Param: filed_name >> is the name of the unfilled field. '''
 
+    # -------------------------------------------------------------------------
+    # Popup Helpers
+    # -------------------------------------------------------------------------
+
+    def check_for_mandatory_fillings(self, field_name):
+        '''Shows an error popup for an unfilled mandatory field.'''
         msg = QMessageBox()
         msg.setWindowTitle('Incomplete form!')
-        msg.setText(f"{filed_name} has left unfilled!")
+        msg.setText(f"{field_name} has been left unfilled!")
         msg.setIcon(QMessageBox.Critical)
-        
-        x = msg.exec_()
-    
-    def popupIncorrect(self, message):
-        '''This function pops up when the user provides an incorrect value.
+        msg.exec_()
 
-        Param: message >> gets string and print it in the popup messageBox.
-        '''
+    def popupIncorrect(self, message):
+        '''Shows an error popup for an incorrect value.'''
         msg = QMessageBox()
-        msg.setWindowTitle('Incomplete data insertion!')
-        msg.setWindowIcon(QtGui.QIcon('crop_icon_spare.png'))
-        msg.setText(f"{message} is provided")
+        msg.setWindowTitle('Incorrect data!')
+        msg.setText(message)
         msg.setIcon(QMessageBox.Critical)
-        
-        y = msg.exec_()
+        msg.exec_()
 
     def popupIncorrectValue(self):
-        '''This function checks the provided values of the Train, Test, and Validation datasets.
-        '''
+        '''Shows an error popup for invalid Train/Test/Validation percentages.'''
         msg = QMessageBox()
         msg.setWindowTitle('Incorrect data insertion!')
-        msg.setText(" Total Percentage for all Train, Test, and Validation needs to be 100\n Their value cannot exceed 100.\n Their addition can be exactly equal to 100.\n In case, one of the fileds remains unfilled, it will be considered as 0!")
+        msg.setText(
+            "Total percentage for Train, Test, and Validation must equal 100.\n"
+            "No individual value can exceed 100.\n"
+            "Leave all three empty to skip dataset splitting."
+        )
         msg.setIcon(QMessageBox.Critical)
-        
-        z = msg.exec_()
-
+        msg.exec_()
 
     def popupIncorrectCharacterInsersion(self, name):
+        '''Shows an error popup when a non-integer value is entered.'''
         msg = QMessageBox()
         msg.setWindowTitle('Incorrect data insertion!')
-        msg.setText(f"{name} should be inserted as a positive integer.")
+        msg.setText(f"{name} must be a positive integer.")
         msg.setIcon(QMessageBox.Critical)
-        
-        g = msg.exec_()
-    
+        msg.exec_()
+
+    # -------------------------------------------------------------------------
+    # Main Patching Logic
+    # -------------------------------------------------------------------------
+
     def patchifying(self):
-        # Load the image:
-        # (1) Check if the filepath for input image is filled.
+
+        # (1) Validate mandatory fields
         if not self.lineEdit_input.text():
             self.check_for_mandatory_fillings("Input Image")
-        # (2) Check if the folderpath for storing the results is filled.
-        elif not self.lineEdit_export.text():
+            return
+        if not self.lineEdit_export.text():
             self.check_for_mandatory_fillings("Export Folder")
-        # (3) Read the image if the filepath & the export folderpath are filled!
-        else:
-            self.image = cv2.imread(self.image_filename)
-        
-        # Calculating Dim, height, width, channel: 
+            return
+        if not self.lineEdit_outname.text():
+            self.check_for_mandatory_fillings("Output Name")
+            return
+
+        # (2) Validate window size and stride fields
+        for field, name in [
+            (self.lineEdit_winx,   'Window Size X'),
+            (self.lineEdit_winy,   'Window Size Y'),
+            (self.lineEdit_stridex, 'Stride X'),
+            (self.lineEdit_stridey, 'Stride Y'),
+        ]:
+            if not field.text() or not field.text().isnumeric():
+                self.popupIncorrectCharacterInsersion(name)
+                return
+
+        # (3) Read the image
+        self.image = cv2.imread(self.image_filename)
+        if self.image is None:
+            self.popupIncorrect("Could not read the selected image file.")
+            return
+
+        # (4) Image dimensions
         self.dim = self.image.ndim
-        
         if self.dim == 2:
             self.Height, self.Width = self.image.shape[:2]
             self.channel = 1
-        if self.dim == 3:
+        else:
             self.Height, self.Width, self.channel = self.image.shape[:3]
 
+        print(f"Image Height >> {self.Height}\nImage Width  >> {self.Width}")
 
-        # Getting the user-defined Patch Step and Size:
+        # (5) Patch size and stride
         self.patchSize_x = int(self.lineEdit_winx.text())
         self.patchSize_y = int(self.lineEdit_winy.text())
-    
         self.patchStep_x = int(self.lineEdit_stridex.text())
         self.patchStep_y = int(self.lineEdit_stridey.text())
-        
-        print(f"Image Height >>  {self.Height} \nImage Width >> {self.Width}")
-        print(f"Patch Size Y >>  {self.patchSize_y} \nPatch Size X >> {self.patchSize_x}")
 
+        print(f"Patch Size X >> {self.patchSize_x}\nPatch Size Y >> {self.patchSize_y}")
 
-       
-        # Mask a set of the index numbers for the checked augmentation methods
-        self.selected_augment_methods = set()          # Creating an empty set which will filled by the selected augmentation methods' indexes.
-        if self.check_original.isChecked():
-            self.selected_augment_methods.update([0])
-        
-        if self.check_rotate90.isChecked():
-            self.selected_augment_methods.update([1])
+        # (6) Collect selected augmentation methods
+        self.selected_augment_methods = set()
+        checks = [
+            self.check_original, self.check_rotate90, self.check_rotate180,
+            self.check_rotate270, self.check_flipv, self.check_fliph, self.check_flipvh
+        ]
+        for idx, cb in enumerate(checks):
+            if cb.isChecked():
+                self.selected_augment_methods.add(idx)
 
-        if self.check_rotate180.isChecked():
-            self.selected_augment_methods.update([2])
-
-        if self.check_rotate270.isChecked():
-            self.selected_augment_methods.update([3])
-
-        if self.check_flipv.isChecked():
-            self.selected_augment_methods.update([4])
-
-        if self.check_fliph.isChecked():
-            self.selected_augment_methods.update([5])
-
-        if self.check_flipvh.isChecked():
-            self.selected_augment_methods.update([6])
-        
-        # A name-list related to the available augmentation techniques according to their index numbers provided by augment method
         self.augment_passifixes = ['o', 'r90', 'r180', 'r270', 'fv', 'fh', 'fvh']
 
-        # Check if the inserted percentages for sample division is correctly assigned.
-        # (1) Check Train, Test, and Validation individually, where they cannot get strings, or integers more than 100.
-        if self.lineEdit_train.text():
-            if self.lineEdit_train.text().isnumeric():
-                self.Train_val = int(self.lineEdit_train.text())
-                if self.Train_val > 100:
-                    self.popupIncorrectValue()
-            elif not self.lineEdit_train.text().isnumeric():
-                self.popupIncorrectCharacterInsersion('Train Percentage')            
-        elif not self.lineEdit_train.text():
-            self.Train_val = 0
-        print(f'Train_val is {self.Train_val}')
-        
-        
-        if self.lineEdit_test.text():
-            if self.lineEdit_test.text().isnumeric():
-                self.Test_val = int(self.lineEdit_test.text())
-                if self.Test_val > 100:
-                    self.popupIncorrectValue()
-            elif not self.lineEdit_test.text().isnumeric():
-                self.popupIncorrectCharacterInsersion('Test Percentage')            
-        elif not self.lineEdit_test.text(): 
-            self.Test_val = 0
-        print(f'Test_val is {self.Test_val}')
+        # (7) Validate Train/Test/Validation percentages
+        self.Train_val = 0
+        self.Test_val  = 0
+        self.Valid_val = 0
 
-        if self.lineEdit_valid.text():
-            if self.lineEdit_valid.text().isnumeric():
-                self.Valid_val = int(self.lineEdit_valid.text())
-                if self.Valid_val > 100:
-                    self.popupIncorrectValue()
-            elif not self.lineEdit_valid.text().isnumeric():
-                self.popupIncorrectCharacterInsersion('Validation Percentage')
-        elif not self.lineEdit_valid.text(): 
-            self.Valid_val = 0
-        print(f'Valid_val is {self.Train_val}')
+        for val_attr, field, name in [
+            ('Train_val', self.lineEdit_train, 'Train Percentage'),
+            ('Test_val',  self.lineEdit_test,  'Test Percentage'),
+            ('Valid_val', self.lineEdit_valid,  'Validation Percentage'),
+        ]:
+            if field.text():
+                if field.text().isnumeric():
+                    val = int(field.text())
+                    if val > 100:
+                        self.popupIncorrectValue()
+                        return
+                    setattr(self, val_attr, val)
+                else:
+                    self.popupIncorrectCharacterInsersion(name)
+                    return
 
-        # (2) check if the summation of all three is 100.
-        if (self.Train_val + self.Test_val + self.Valid_val) != 100:
+        print(f"Train: {self.Train_val}  Test: {self.Test_val}  Valid: {self.Valid_val}")
+
+        total_pct = self.Train_val + self.Test_val + self.Valid_val
+        if total_pct != 100 and total_pct != 0:
             self.popupIncorrectValue()
-        elif ((self.Train_val + self.Test_val + self.Valid_val) == 100) or ((self.Train_val + self.Test_val + self.Valid_val) == 0):
-            self.total_path = os.path.join(self.saving_folder_name + "//" + "Total")
-            os.mkdir(self.total_path)
+            return
 
+        # (8) Create Total output folder
+        self.total_path = os.path.join(self.saving_folder_name, "Total")
+        os.mkdir(self.total_path)
 
-            # Starting to crop and then augment the patches and finally save them.
-            if self.patchSize_y > self.Height or self.patchSize_x > self.Width:
-                self.popupIncorrect("Patch size cannot exceed your image size!\n See your command line to get informed about the input image size!")
+        # (9) Validate patch size against image size
+        if self.patchSize_y > self.Height or self.patchSize_x > self.Width:
+            self.popupIncorrect(
+                "Patch size cannot exceed the image size!\n"
+                f"Image size: {self.Width} x {self.Height}"
+            )
+            return
 
-            elif self.patchSize_y <= self.Height and self.patchSize_x <= self.Width:
+        # (10) Reset saved names list for this run
+        self.list_of_saved_names = []
 
+        # (11) Sliding window crop + augment + save
+        self.steps_in_height = math.floor((self.Height - self.patchSize_y) / self.patchStep_y) + 1
+        self.steps_in_width  = math.floor((self.Width  - self.patchSize_x) / self.patchStep_x) + 1
 
-            # Counting the number of Steps in a row and a column to complete the cropping operations:
-                self.steps_in_height = math.floor((self.Height - self.patchSize_y) / self.patchStep_y) + 1
-                self.steps_in_width = math.floor((self.Width - self.patchSize_x) / self.patchStep_x) + 1
-                
-                
-                self.num_of_crop = 0      # This is the number of cropped images during the operations
-                for row in range(self.steps_in_height):
-                    for col in range(self.steps_in_width):
-                        # Cropping operations
-                        self.num_of_crop += 1        # Counting the number of cropped images
-                        # self.progressbar.setValue(self.num_of_crop)
-                        if self.channel == 1:        # The cropping operation for 1-channel input image
-                            self.crop_image = self.image[row*self.patchStep_y:row*self.patchStep_y+self.patchSize_y, col*self.patchStep_x:col*self.patchStep_x+self.patchSize_x]
+        self.num_of_crop = 0
+        for row in range(self.steps_in_height):
+            for col in range(self.steps_in_width):
+                self.num_of_crop += 1
 
-                        elif self.channel >= 2:        # The cropping operation for n-channel input image
-                            self.crop_image = self.image[row*self.patchStep_y:row*self.patchStep_y+self.patchSize_y, col*self.patchStep_x:col*self.patchStep_x+self.patchSize_x, :]
-                        
-                        # Augmenting the cropped image:
-                        self.augment_list = augment(self.crop_image)
-                        
-
-                        # Saving the augmented forms of cropped image in the selected augment formats
-                        for aug_idx in list(self.selected_augment_methods):
-                            name_for_saving = str(self.num_of_crop) + "_" + self.lineEdit_outname.text() + "_" +  self.augment_passifixes[aug_idx] + "." + self.imageNamePassifix
-                            fullpath_for_saving = self.total_path + "//" + name_for_saving
-                            cv2.imwrite(fullpath_for_saving, self.augment_list[aug_idx])
-                            self.list_of_saved_names.append(name_for_saving)         # Creating name of saved files in a list
-
-                            # Calculating the percentage needed to accomplish the whole patching process.
-                            self.percent_of_completion = math.floor((self.num_of_crop)/(self.steps_in_height * self.steps_in_width)*100)
-                            time.sleep(.05)
-                            self.progress_label.setText(f' {self.percent_of_completion}% is completed!')
-                            QApplication.processEvents()
-
-
-        # Making Train, Test, Validation dataset from created Total dataset.                
-        if (self.Train_val + self.Test_val + self.Valid_val) == 100:
-            # Once all cropped data is stored in the "Total" Directory, it is time to divide them into Train, Test, and Validation dataset.
-            # All the cropped images' full filepath is stored in the list named "self.list_of_saved_names", 
-            # we need to first randomize them and then store them in the Train, Test, and Validation directories with respect to the user-defined percentages.
-            self.randomized = self.list_of_saved_names.copy()
-            random.shuffle(self.randomized)
-
-            # Check if the inserted values for Train, Test, Validation datasets are correct!.
-            # Create the required directories for Train, Test, and Validation if their user-defined value is greater than zero.
-            if self.Train_val == 0:
-                if self.Test_val == 0 and self.Valid_val == 100:
-                    self.num_tobe_assigned_Valid = len(self.randomized)
-                    self.valid_path = os.path.join(self.saving_folder_name + "//" + "Validation")
-                    os.mkdir(self.valid_path)
-                elif self.Test_val == 100 and self.Valid_val == 0:
-                    self.num_tobe_assigned_Test = len(self.randomized)
-                    self.test_path = os.path.join(self.saving_folder_name + "//" + "Test")
-                    os.mkdir(self.test_path)
+                if self.channel == 1:
+                    crop_image = self.image[
+                        row * self.patchStep_y : row * self.patchStep_y + self.patchSize_y,
+                        col * self.patchStep_x : col * self.patchStep_x + self.patchSize_x
+                    ]
                 else:
-                    self.num_tobe_assigned_Test = math.floor((self.Test_val/100)* len(self.randomized))
-                    self.num_tobe_assigned_Valid = len(self.randomized) - self.num_tobe_assigned_Test
-                    self.num_tobe_assigned_Train = 0
-                    self.test_path = os.path.join(self.saving_folder_name + "//" + "Test")
-                    os.mkdir(self.test_path)
-                    self.valid_path = os.path.join(self.saving_folder_name + "//" + "Validation")
-                    os.mkdir(self.valid_path)
+                    crop_image = self.image[
+                        row * self.patchStep_y : row * self.patchStep_y + self.patchSize_y,
+                        col * self.patchStep_x : col * self.patchStep_x + self.patchSize_x,
+                        :
+                    ]
 
-            elif self.Test_val == 0:
-                if self.Valid_val == 0 and self.Train_val == 100:
-                    self.num_tobe_assigned_Train = len(self.randomized)
-                    self.train_path = os.path.join(self.saving_folder_name + "//" + "Train")
-                    os.mkdir(self.train_path)
-                else:
-                    self.num_tobe_assigned_Train = math.floor((self.Train_val/100)* len(self.randomized))
-                    self.num_tobe_assigned_Valid = len(self.randomized) - self.num_tobe_assigned_Train
-                    self.num_tobe_assigned_Test = 0
-                    self.train_path = os.path.join(self.saving_folder_name + "//" + "Train")
-                    os.mkdir(self.train_path)
-                    self.valid_path = os.path.join(self.saving_folder_name + "//" + "Validation")
-                    os.mkdir(self.valid_path)
+                augment_list = augment(crop_image)
 
+                for aug_idx in self.selected_augment_methods:
+                    name_for_saving = (
+                        f"{self.num_of_crop}_{self.lineEdit_outname.text()}"
+                        f"_{self.augment_passifixes[aug_idx]}.{self.imageNamePassifix}"
+                    )
+                    fullpath_for_saving = os.path.join(self.total_path, name_for_saving)
+                    cv2.imwrite(fullpath_for_saving, augment_list[aug_idx])
+                    self.list_of_saved_names.append(name_for_saving)
 
+                percent = math.floor(self.num_of_crop / (self.steps_in_height * self.steps_in_width) * 100)
+                self.progress_label.setText(f'Patching: {percent}% completed')
+                QApplication.processEvents()
+
+        self.progress_label.setText('Patching complete! Starting dataset split...')
+        QApplication.processEvents()
+
+        # (12) Dataset splitting (only if percentages were provided)
+        if total_pct == 100:
+            self._split_dataset()
+
+        self.progress_label.setText('All done!')
+        QApplication.processEvents()
+
+    def _split_dataset(self):
+        '''Shuffles and splits the total patches into Train, Test, Validation folders.'''
+
+        randomized = self.list_of_saved_names.copy()
+        random.shuffle(randomized)
+        total_number = len(randomized)
+
+        # Determine counts for each split
+        if self.Train_val == 0:
+            num_train = 0
+            if self.Test_val == 0:
+                num_test  = 0
+                num_valid = total_number
             elif self.Valid_val == 0:
-                self.num_tobe_assigned_Train = math.floor((self.Train_val/100)* len(self.randomized))
-                self.num_tobe_assigned_Test = len(self.randomized) - self.num_tobe_assigned_Train
-                self.num_tobe_assigned_Valid = 0
-                self.train_path = os.path.join(self.saving_folder_name + "//" + "Train")
-                os.mkdir(self.train_path)
-                self.test_path = os.path.join(self.saving_folder_name + "//" + "Test")
-                os.mkdir(self.test_path)
-                
-
+                num_test  = total_number
+                num_valid = 0
             else:
-                self.num_tobe_assigned_Train = math.floor((self.Train_val/100)* len(self.randomized))
-                what_is_left = len(self.randomized) - self.num_tobe_assigned_Train
-                self.num_tobe_assigned_Test =  math.floor((self.Test_val/(self.Test_val + self.Valid_val)) * what_is_left) 
-                self.num_tobe_assigned_Valid = what_is_left - self.num_tobe_assigned_Test
-                self.train_path = os.path.join(self.saving_folder_name + "//" + "Train")
-                os.mkdir(self.train_path)
-                self.test_path = os.path.join(self.saving_folder_name + "//" + "Test")
-                os.mkdir(self.test_path)
-                self.valid_path = os.path.join(self.saving_folder_name + "//" + "Validation")
-                os.mkdir(self.valid_path)
-            
-            # (3) Dividing and Storing dataset on created Train, Test, and Validation directories.
-            # - Updating Progress Label for the data division section.
-            self.progress_label.setText('Division section is Starting...')
-            QApplication.processEvents()       # Avoid Freezing the GUI while asks for the updates on the progress label.
-            time.sleep(3)
+                num_test  = math.floor((self.Test_val / 100) * total_number)
+                num_valid = total_number - num_test
 
-            self.percent_of_completion = 0     # Reseting the precent of completion
-            self.progress_label.setText(f'Process of dataset devision: {self.percent_of_completion}% is completed!')
-            QApplication.processEvents()       # Avoid Freezing the GUI while asks for the updates on the progress label.
+        elif self.Test_val == 0:
+            num_test = 0
+            if self.Valid_val == 0:
+                num_train = total_number
+                num_valid = 0
+            else:
+                num_train = math.floor((self.Train_val / 100) * total_number)
+                num_valid = total_number - num_train
 
+        elif self.Valid_val == 0:
+            num_valid = 0
+            num_train = math.floor((self.Train_val / 100) * total_number)
+            num_test  = total_number - num_train
 
-            saved_counting = 0
-            total_number = len(self.randomized)
+        else:
+            num_train = math.floor((self.Train_val / 100) * total_number)
+            what_is_left = total_number - num_train
+            num_test  = math.floor((self.Test_val / (self.Test_val + self.Valid_val)) * what_is_left)
+            num_valid = what_is_left - num_test
 
-            # Storing samples in the Train directory.
-            for _ in range(self.num_tobe_assigned_Train):
-                fileName = self.randomized.pop(0)
-                shutil.copy2(self.total_path+"//"+fileName, self.train_path+"//"+fileName)
-                saved_counting +=1
-                self.percent_of_completion = math.floor((saved_counting)/(total_number)*100)
-                self.progress_label.setText(f' {self.percent_of_completion}% is completed!')
+        # Create directories only for non-zero splits
+        train_path = valid_path = test_path = None
+        if num_train > 0:
+            train_path = os.path.join(self.saving_folder_name, "Train")
+            os.mkdir(train_path)
+        if num_test > 0:
+            test_path = os.path.join(self.saving_folder_name, "Test")
+            os.mkdir(test_path)
+        if num_valid > 0:
+            valid_path = os.path.join(self.saving_folder_name, "Validation")
+            os.mkdir(valid_path)
+
+        # Copy files into each split directory
+        saved_count = 0
+
+        for dest_path, count in [(train_path, num_train), (test_path, num_test), (valid_path, num_valid)]:
+            for _ in range(count):
+                file_name = randomized.pop(0)
+                shutil.copy2(
+                    os.path.join(self.total_path, file_name),
+                    os.path.join(dest_path, file_name)
+                )
+                saved_count += 1
+                percent = math.floor(saved_count / total_number * 100)
+                self.progress_label.setText(f'Dataset split: {percent}% completed')
                 QApplication.processEvents()
 
-            # Storing samples in the Test directory.
-            for _ in range(self.num_tobe_assigned_Test):
-                fileName = self.randomized.pop(0)
-                shutil.copy2(self.total_path+"//"+fileName, self.test_path+"//"+fileName)
-                saved_counting +=1
-                self.percent_of_completion = math.floor((saved_counting)/(total_number)*100)
-                self.progress_label.setText(f'Process of dataset devision: {self.percent_of_completion}% is completed!')
-                QApplication.processEvents()
 
-            # Storing samples in the Validation directory.
-            for _ in range(self.num_tobe_assigned_Valid):
-                fileName = self.randomized.pop(0)
-                shutil.copy2(self.total_path+"//"+fileName, self.valid_path+"//"+fileName)
-                saved_counting +=1
-                self.percent_of_completion = math.floor((saved_counting)/(total_number)*100)
-                self.progress_label.setText(f'Process of dataset devision: {self.percent_of_completion}% is completed!')
-                QApplication.processEvents()
-
-          
-
-
-# Initialize The App:
+# Initialize The App
 app = QApplication(sys.argv)
 UIWindow = UI()
 app.exec_()
