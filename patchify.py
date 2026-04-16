@@ -1,15 +1,43 @@
-import cv2
+import numpy as np
+from osgeo import gdal, gdal_array
 from PyQt5.QtWidgets import (
-    QAction, QApplication, QCheckBox, QDialog, QFileDialog, QGridLayout,
-    QGroupBox, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QRadioButton, QToolButton, QWidget
+    QAction, QApplication, QCheckBox, QDialog, QFileDialog,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QRadioButton, QToolButton, QVBoxLayout
 )
 from PyQt5.QtGui import QIcon
 import math
 import os
 import shutil
 import random
-from augment import augment
+from .augment import augment
+
+
+_EXT_TO_DRIVER = {'tif': 'GTiff', 'tiff': 'GTiff', 'png': 'PNG', 'jpg': 'JPEG', 'jpeg': 'JPEG'}
+
+
+def _read_image(filepath):
+    ds = gdal.Open(filepath)
+    if ds is None:
+        return None
+    bands = [ds.GetRasterBand(i + 1).ReadAsArray() for i in range(ds.RasterCount)]
+    return bands[0] if ds.RasterCount == 1 else np.stack(bands, axis=-1)
+
+
+def _save_patch(array, filepath, ext):
+    array = np.ascontiguousarray(array)
+    driver = gdal.GetDriverByName(_EXT_TO_DRIVER.get(ext.lower(), 'GTiff'))
+    h, w = array.shape[:2]
+    n_bands = 1 if array.ndim == 2 else array.shape[2]
+    dtype = gdal_array.NumericTypeCodeToGDALTypeCode(array.dtype)
+    ds = driver.Create(filepath, w, h, n_bands, dtype)
+    if n_bands == 1:
+        ds.GetRasterBand(1).WriteArray(array if array.ndim == 2 else array[:, :, 0])
+    else:
+        for b in range(n_bands):
+            ds.GetRasterBand(b + 1).WriteArray(array[:, :, b])
+    ds.FlushCache()
+    ds = None
 
 
 # -----------------------------------------------------------------------------
@@ -49,37 +77,40 @@ class PatchifyDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        # --- Window Setup ---
         self.setWindowTitle('Patchify')
         self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), 'crop_icon.png')))
-        self.setFixedSize(700, 600)
+        self.setMinimumWidth(660)
 
-        # --- Title Label ---
-        title_label = QLabel('Patchify App', self)
-        title_label.setGeometry(10, 0, 311, 61)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 12, 16, 12)
+        root.setSpacing(10)
+
+        # --- Title ---
+        title_label = QLabel('Patchify App')
         title_label.setStyleSheet('font: 16pt "Segoe Print";')
+        root.addWidget(title_label)
 
-        # --- Input / Export / Mask Section ---
-        io_widget = QWidget(self)
-        io_widget.setGeometry(30, 70, 641, 110)
-        io_layout = QGridLayout(io_widget)
-        io_layout.setContentsMargins(0, 0, 0, 0)
+        # --- I/O section ---
+        lbl_style = 'font: 10pt "Microsoft JhengHei UI";'
 
-        label_input = QLabel('   Input Image      ')
-        label_input.setStyleSheet('font: 10pt "Microsoft JhengHei UI";')
+        io_layout = QGridLayout()
+        io_layout.setColumnStretch(1, 1)
+
+        label_input = QLabel('Input Image')
+        label_input.setStyleSheet(lbl_style)
         self.lineEdit_input = QLineEdit()
         self.btn_input = QToolButton()
         self.btn_input.setText('...')
 
-        label_export = QLabel('Export Folder     ')
-        label_export.setStyleSheet('font: 10pt "Microsoft JhengHei UI";')
+        label_export = QLabel('Export Folder')
+        label_export.setStyleSheet(lbl_style)
         self.lineEdit_export = QLineEdit()
         self.btn_export = QToolButton()
         self.btn_export.setText('...')
 
         # Mask row — checkbox acts as label; inputs disabled until checked
-        self.check_mask_enabled = QCheckBox('   Mask / Label Image  (binary & multi-class supported)')
-        self.check_mask_enabled.setStyleSheet('font: 10pt "Microsoft JhengHei UI";')
+        self.check_mask_enabled = QCheckBox('Mask / Label Image  (binary & multi-class supported)')
+        self.check_mask_enabled.setStyleSheet(lbl_style)
         self.lineEdit_mask = QLineEdit()
         self.lineEdit_mask.setEnabled(False)
         self.btn_mask = QToolButton()
@@ -95,52 +126,57 @@ class PatchifyDialog(QDialog):
         io_layout.addWidget(self.check_mask_enabled, 2, 0)
         io_layout.addWidget(self.lineEdit_mask,      2, 1)
         io_layout.addWidget(self.btn_mask,           2, 2)
+        root.addLayout(io_layout)
 
-        # --- Cropping Parameters GroupBox ---
-        gb_crop = QGroupBox('Cropping Parameters:', self)
-        gb_crop.setGeometry(30, 200, 310, 141)
+        # --- Middle row: Cropping Parameters + Output Options ---
+        mid_row = QHBoxLayout()
 
-        QLabel('Window Size:', gb_crop).setGeometry(40, 40, 81, 16)
-        QLabel('X', gb_crop).setGeometry(120, 40, 16, 16)
-        self.lineEdit_winx = QLineEdit(gb_crop)
-        self.lineEdit_winx.setGeometry(140, 40, 41, 20)
-        QLabel('Y', gb_crop).setGeometry(200, 40, 16, 16)
-        self.lineEdit_winy = QLineEdit(gb_crop)
-        self.lineEdit_winy.setGeometry(220, 40, 41, 20)
+        gb_crop = QGroupBox('Cropping Parameters:')
+        crop_layout = QGridLayout(gb_crop)
+        self.lineEdit_winx = QLineEdit()
+        self.lineEdit_winx.setMaximumWidth(55)
+        self.lineEdit_winy = QLineEdit()
+        self.lineEdit_winy.setMaximumWidth(55)
+        self.lineEdit_stridex = QLineEdit()
+        self.lineEdit_stridex.setMaximumWidth(55)
+        self.lineEdit_stridey = QLineEdit()
+        self.lineEdit_stridey.setMaximumWidth(55)
+        crop_layout.addWidget(QLabel('Window Size:'), 0, 0)
+        crop_layout.addWidget(QLabel('X'),            0, 1)
+        crop_layout.addWidget(self.lineEdit_winx,     0, 2)
+        crop_layout.addWidget(QLabel('Y'),            0, 3)
+        crop_layout.addWidget(self.lineEdit_winy,     0, 4)
+        crop_layout.addWidget(QLabel('Stride:'),      1, 0)
+        crop_layout.addWidget(QLabel('X'),            1, 1)
+        crop_layout.addWidget(self.lineEdit_stridex,  1, 2)
+        crop_layout.addWidget(QLabel('Y'),            1, 3)
+        crop_layout.addWidget(self.lineEdit_stridey,  1, 4)
+        mid_row.addWidget(gb_crop)
 
-        QLabel('Stride:', gb_crop).setGeometry(70, 80, 41, 16)
-        QLabel('X', gb_crop).setGeometry(120, 80, 16, 16)
-        self.lineEdit_stridex = QLineEdit(gb_crop)
-        self.lineEdit_stridex.setGeometry(140, 80, 41, 20)
-        QLabel('Y', gb_crop).setGeometry(200, 80, 16, 16)
-        self.lineEdit_stridey = QLineEdit(gb_crop)
-        self.lineEdit_stridey.setGeometry(220, 80, 41, 20)
+        gb_output = QGroupBox('Output Options:')
+        out_layout = QGridLayout(gb_output)
+        out_layout.setColumnStretch(1, 1)
+        self.lineEdit_outname = QLineEdit()
+        self.lineEdit_train   = QLineEdit()
+        self.lineEdit_train.setMaximumWidth(60)
+        self.lineEdit_test    = QLineEdit()
+        self.lineEdit_test.setMaximumWidth(60)
+        self.lineEdit_valid   = QLineEdit()
+        self.lineEdit_valid.setMaximumWidth(60)
+        out_layout.addWidget(QLabel('Output Name:'),          0, 0)
+        out_layout.addWidget(self.lineEdit_outname,           0, 1)
+        out_layout.addWidget(QLabel('Training Percentage'),   1, 0)
+        out_layout.addWidget(self.lineEdit_train,             1, 1)
+        out_layout.addWidget(QLabel('Testing Percentage'),    2, 0)
+        out_layout.addWidget(self.lineEdit_test,              2, 1)
+        out_layout.addWidget(QLabel('Validation Percentage'), 3, 0)
+        out_layout.addWidget(self.lineEdit_valid,             3, 1)
+        mid_row.addWidget(gb_output)
+        root.addLayout(mid_row)
 
-        # --- Output Options GroupBox ---
-        gb_output = QGroupBox('Output Options:', self)
-        gb_output.setGeometry(360, 200, 310, 141)
-
-        QLabel('Output name:', gb_output).setGeometry(40, 25, 71, 16)
-        self.lineEdit_outname = QLineEdit(gb_output)
-        self.lineEdit_outname.setGeometry(120, 25, 141, 20)
-
-        QLabel('Training Percentage', gb_output).setGeometry(40, 60, 111, 16)
-        self.lineEdit_train = QLineEdit(gb_output)
-        self.lineEdit_train.setGeometry(190, 60, 71, 20)
-
-        QLabel('Testing Percentage', gb_output).setGeometry(40, 85, 111, 16)
-        self.lineEdit_test = QLineEdit(gb_output)
-        self.lineEdit_test.setGeometry(190, 85, 71, 20)
-
-        QLabel('Validation Percentage', gb_output).setGeometry(40, 110, 111, 16)
-        self.lineEdit_valid = QLineEdit(gb_output)
-        self.lineEdit_valid.setGeometry(190, 110, 71, 20)
-
-        # --- Augmentation Options GroupBox ---
-        gb_aug = QGroupBox('Augmentation Options:', self)
-        gb_aug.setGeometry(30, 350, 641, 131)
+        # --- Augmentation Options ---
+        gb_aug = QGroupBox('Augmentation Options:')
         aug_layout = QGridLayout(gb_aug)
-
         self.radio_all    = QRadioButton('All')
         self.radio_custom = QRadioButton('Custom Selection')
         self.check_original  = QCheckBox('Original Image')
@@ -150,7 +186,6 @@ class PatchifyDialog(QDialog):
         self.check_flipv     = QCheckBox('Flip Vertically')
         self.check_fliph     = QCheckBox('Flip Horizontally')
         self.check_flipvh    = QCheckBox('Flip Vertically and Horizontally')
-
         aug_layout.addWidget(self.radio_all,       0, 0)
         aug_layout.addWidget(self.radio_custom,    1, 0)
         aug_layout.addWidget(self.check_original,  0, 2)
@@ -160,16 +195,20 @@ class PatchifyDialog(QDialog):
         aug_layout.addWidget(self.check_flipv,     1, 3)
         aug_layout.addWidget(self.check_fliph,     2, 3)
         aug_layout.addWidget(self.check_flipvh,    3, 3)
+        root.addWidget(gb_aug)
 
-        # --- Progress Label ---
-        self.progress_label = QLabel('Patchify is waiting for orders!', self)
-        self.progress_label.setGeometry(30, 495, 351, 16)
+        # --- Progress label ---
+        self.progress_label = QLabel('Patchify is waiting for orders!')
+        root.addWidget(self.progress_label)
 
-        # --- Action Buttons ---
-        self.btn_start = QPushButton('Start Patching', self)
-        self.btn_start.setGeometry(450, 540, 100, 30)
-        self.btn_cancel = QPushButton('Cancel', self)
-        self.btn_cancel.setGeometry(560, 540, 100, 30)
+        # --- Action buttons ---
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.btn_start  = QPushButton('Start Patching')
+        self.btn_cancel = QPushButton('Cancel')
+        btn_row.addWidget(self.btn_start)
+        btn_row.addWidget(self.btn_cancel)
+        root.addLayout(btn_row)
 
         # --- Signals & Slots ---
         self.radio_all.toggled.connect(self.allChecked)
@@ -186,12 +225,12 @@ class PatchifyDialog(QDialog):
         self.allChecked()
 
         # Default values
-        self.Train_val       = 0
-        self.Test_val        = 0
-        self.Valid_val       = 0
+        self.Train_val           = 0
+        self.Test_val            = 0
+        self.Valid_val           = 0
         self.list_of_saved_names = []
-        self.mask_filename   = None
-        self.maskNamePassifix = None
+        self.mask_filename       = None
+        self.maskNamePassifix    = None
 
     # -------------------------------------------------------------------------
     # Slot Functions
@@ -272,7 +311,7 @@ class PatchifyDialog(QDialog):
     def popupIncorrectCharacterInsersion(self, name):
         msg = QMessageBox()
         msg.setWindowTitle('Incorrect data insertion!')
-        msg.setText(f"{name} must be a positive integer.")
+        msg.setText(f"{name} must be a positive integer (≥ 1).")
         msg.setIcon(QMessageBox.Critical)
         msg.exec_()
 
@@ -293,19 +332,19 @@ class PatchifyDialog(QDialog):
             self.check_for_mandatory_fillings("Output Name")
             return
 
-        # (2) Validate window size and stride fields
+        # (2) Validate window size and stride fields — must be positive integers
         for field, name in [
             (self.lineEdit_winx,    'Window Size X'),
             (self.lineEdit_winy,    'Window Size Y'),
             (self.lineEdit_stridex, 'Stride X'),
             (self.lineEdit_stridey, 'Stride Y'),
         ]:
-            if not field.text() or not field.text().isnumeric():
+            if not field.text() or not field.text().isnumeric() or int(field.text()) < 1:
                 self.popupIncorrectCharacterInsersion(name)
                 return
 
         # (3) Read the image
-        self.image = cv2.imread(self.image_filename)
+        self.image = _read_image(self.image_filename)
         if self.image is None:
             self.popupIncorrect("Could not read the selected image file.")
             return
@@ -368,7 +407,7 @@ class PatchifyDialog(QDialog):
             if not self.lineEdit_mask.text():
                 self.check_for_mandatory_fillings("Mask / Label Image")
                 return
-            mask_image = cv2.imread(self.mask_filename, cv2.IMREAD_UNCHANGED)
+            mask_image = _read_image(self.mask_filename)
             if mask_image is None:
                 self.popupIncorrect("Could not read the selected mask image file.")
                 return
@@ -428,7 +467,7 @@ class PatchifyDialog(QDialog):
                         f"{self.num_of_crop}_{self.lineEdit_outname.text()}"
                         f"_{self.augment_passifixes[aug_idx]}.{self.imageNamePassifix}"
                     )
-                    cv2.imwrite(os.path.join(total_img_path, img_name), augment_list[aug_idx])
+                    _save_patch(augment_list[aug_idx], os.path.join(total_img_path, img_name), self.imageNamePassifix)
                     self.list_of_saved_names.append(img_name)
 
                     if mask_enabled:
@@ -436,7 +475,7 @@ class PatchifyDialog(QDialog):
                             f"{self.num_of_crop}_{self.lineEdit_outname.text()}"
                             f"_{self.augment_passifixes[aug_idx]}.{self.maskNamePassifix}"
                         )
-                        cv2.imwrite(os.path.join(total_mask_path, mask_name), mask_augment_list[aug_idx])
+                        _save_patch(mask_augment_list[aug_idx], os.path.join(total_mask_path, mask_name), self.maskNamePassifix)
 
                 percent = math.floor(self.num_of_crop / (self.steps_in_height * self.steps_in_width) * 100)
                 self.progress_label.setText(f'Patching: {percent}% completed')
