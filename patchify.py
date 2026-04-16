@@ -31,9 +31,9 @@ class UI(QMainWindow):
         title_label.setGeometry(10, 0, 311, 61)
         title_label.setStyleSheet('font: 16pt "Segoe Print";')
 
-        # --- Input / Export Section ---
+        # --- Input / Export / Mask Section ---
         io_widget = QWidget(central)
-        io_widget.setGeometry(30, 70, 641, 81)
+        io_widget.setGeometry(30, 70, 641, 110)
         io_layout = QGridLayout(io_widget)
         io_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -49,16 +49,28 @@ class UI(QMainWindow):
         self.btn_export = QToolButton()
         self.btn_export.setText('...')
 
-        io_layout.addWidget(label_input,          0, 0)
-        io_layout.addWidget(self.lineEdit_input,  0, 1)
-        io_layout.addWidget(self.btn_input,       0, 2)
-        io_layout.addWidget(label_export,         1, 0)
-        io_layout.addWidget(self.lineEdit_export, 1, 1)
-        io_layout.addWidget(self.btn_export,      1, 2)
+        # Mask row — checkbox acts as label; inputs disabled until checked
+        self.check_mask_enabled = QCheckBox('   Mask / Label Image  (binary & multi-class supported)')
+        self.check_mask_enabled.setStyleSheet('font: 10pt "Microsoft JhengHei UI";')
+        self.lineEdit_mask = QLineEdit()
+        self.lineEdit_mask.setEnabled(False)
+        self.btn_mask = QToolButton()
+        self.btn_mask.setText('...')
+        self.btn_mask.setEnabled(False)
+
+        io_layout.addWidget(label_input,               0, 0)
+        io_layout.addWidget(self.lineEdit_input,        0, 1)
+        io_layout.addWidget(self.btn_input,             0, 2)
+        io_layout.addWidget(label_export,               1, 0)
+        io_layout.addWidget(self.lineEdit_export,       1, 1)
+        io_layout.addWidget(self.btn_export,            1, 2)
+        io_layout.addWidget(self.check_mask_enabled,    2, 0)
+        io_layout.addWidget(self.lineEdit_mask,         2, 1)
+        io_layout.addWidget(self.btn_mask,              2, 2)
 
         # --- Cropping Parameters GroupBox ---
         gb_crop = QGroupBox('Cropping Parameters:', central)
-        gb_crop.setGeometry(30, 170, 310, 141)
+        gb_crop.setGeometry(30, 200, 310, 141)
 
         QLabel('Window Size:', gb_crop).setGeometry(40, 40, 81, 16)
         QLabel('X', gb_crop).setGeometry(120, 40, 16, 16)
@@ -78,7 +90,7 @@ class UI(QMainWindow):
 
         # --- Output Options GroupBox ---
         gb_output = QGroupBox('Output Options:', central)
-        gb_output.setGeometry(360, 170, 310, 141)
+        gb_output.setGeometry(360, 200, 310, 141)
 
         QLabel('Output name:', gb_output).setGeometry(40, 25, 71, 16)
         self.lineEdit_outname = QLineEdit(gb_output)
@@ -98,7 +110,7 @@ class UI(QMainWindow):
 
         # --- Augmentation Options GroupBox ---
         gb_aug = QGroupBox('Augmentation Options:', central)
-        gb_aug.setGeometry(30, 320, 641, 131)
+        gb_aug.setGeometry(30, 350, 641, 131)
         aug_layout = QGridLayout(gb_aug)
 
         self.radio_all    = QRadioButton('All')
@@ -123,13 +135,13 @@ class UI(QMainWindow):
 
         # --- Progress Label ---
         self.progress_label = QLabel('Patchify is waiting for orders!', central)
-        self.progress_label.setGeometry(30, 460, 351, 16)
+        self.progress_label.setGeometry(30, 495, 351, 16)
 
         # --- Action Buttons ---
         self.btn_start = QPushButton('Start Patching', central)
-        self.btn_start.setGeometry(450, 510, 100, 30)
+        self.btn_start.setGeometry(450, 540, 100, 30)
         self.btn_cancel = QPushButton('Cancel', central)
-        self.btn_cancel.setGeometry(560, 510, 100, 30)
+        self.btn_cancel.setGeometry(560, 540, 100, 30)
 
         # --- Signals & Slots ---
         self.radio_all.toggled.connect(self.allChecked)
@@ -137,6 +149,8 @@ class UI(QMainWindow):
         self.btn_cancel.clicked.connect(self.close)
         self.btn_input.clicked.connect(self.pickImage)
         self.btn_export.clicked.connect(self.pickSavingFolder)
+        self.btn_mask.clicked.connect(self.pickMaskImage)
+        self.check_mask_enabled.toggled.connect(self.toggleMaskInput)
         self.btn_start.clicked.connect(self.patchifying)
 
         # Default augmentation state
@@ -148,6 +162,8 @@ class UI(QMainWindow):
         self.Test_val  = 0
         self.Valid_val = 0
         self.list_of_saved_names = []
+        self.mask_filename = None
+        self.maskNamePassifix = None
 
         self.show()
 
@@ -185,6 +201,25 @@ class UI(QMainWindow):
         self.saving_folder_name = QFileDialog.getExistingDirectory(self, "Select a Folder", "")
         if self.saving_folder_name:
             self.lineEdit_export.setText(self.saving_folder_name)
+
+    def toggleMaskInput(self, checked):
+        '''Enables or disables the mask image input row.'''
+        self.lineEdit_mask.setEnabled(checked)
+        self.btn_mask.setEnabled(checked)
+        if not checked:
+            self.lineEdit_mask.clear()
+            self.mask_filename = None
+
+    def pickMaskImage(self):
+        '''Opens a file dialog to select the mask/label image.'''
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Select a Mask / Label Image", "",
+            "tif file (*.tif);;png file (*.png);;jpg file (*.jpg)"
+        )
+        if filename:
+            self.mask_filename = filename
+            self.maskNamePassifix = filename.split(".")[-1]
+            self.lineEdit_mask.setText(filename)
 
     # -------------------------------------------------------------------------
     # Popup Helpers
@@ -318,11 +353,37 @@ class UI(QMainWindow):
             self.popupIncorrectValue()
             return
 
-        # (8) Create Total output folder
+        # (8) Optionally read and validate mask image
+        mask_enabled = self.check_mask_enabled.isChecked()
+        mask_image = None
+        if mask_enabled:
+            if not self.lineEdit_mask.text():
+                self.check_for_mandatory_fillings("Mask / Label Image")
+                return
+            mask_image = cv2.imread(self.mask_filename, cv2.IMREAD_UNCHANGED)
+            if mask_image is None:
+                self.popupIncorrect("Could not read the selected mask image file.")
+                return
+            if mask_image.shape[:2] != (self.Height, self.Width):
+                self.popupIncorrect(
+                    f"Mask size ({mask_image.shape[1]} x {mask_image.shape[0]}) "
+                    f"does not match image size ({self.Width} x {self.Height})."
+                )
+                return
+
+        # (9) Create Total output folder (with images/ masks/ subdirs when mask is enabled)
         self.total_path = os.path.join(self.saving_folder_name, "Total")
         os.mkdir(self.total_path)
+        if mask_enabled:
+            total_img_path  = os.path.join(self.total_path, "images")
+            total_mask_path = os.path.join(self.total_path, "masks")
+            os.mkdir(total_img_path)
+            os.mkdir(total_mask_path)
+        else:
+            total_img_path  = self.total_path
+            total_mask_path = None
 
-        # (9) Validate patch size against image size
+        # (10) Validate patch size against image size
         if self.patchSize_y > self.Height or self.patchSize_x > self.Width:
             self.popupIncorrect(
                 "Patch size cannot exceed the image size!\n"
@@ -330,10 +391,10 @@ class UI(QMainWindow):
             )
             return
 
-        # (10) Reset saved names list for this run
+        # (11) Reset saved names list for this run
         self.list_of_saved_names = []
 
-        # (11) Sliding window crop + augment + save
+        # (12) Sliding window crop + augment + save
         self.steps_in_height = math.floor((self.Height - self.patchSize_y) / self.patchStep_y) + 1
         self.steps_in_width  = math.floor((self.Width  - self.patchSize_x) / self.patchStep_x) + 1
 
@@ -342,28 +403,39 @@ class UI(QMainWindow):
             for col in range(self.steps_in_width):
                 self.num_of_crop += 1
 
+                y1 = row * self.patchStep_y
+                y2 = y1 + self.patchSize_y
+                x1 = col * self.patchStep_x
+                x2 = x1 + self.patchSize_x
+
                 if self.channel == 1:
-                    crop_image = self.image[
-                        row * self.patchStep_y : row * self.patchStep_y + self.patchSize_y,
-                        col * self.patchStep_x : col * self.patchStep_x + self.patchSize_x
-                    ]
+                    crop_image = self.image[y1:y2, x1:x2]
                 else:
-                    crop_image = self.image[
-                        row * self.patchStep_y : row * self.patchStep_y + self.patchSize_y,
-                        col * self.patchStep_x : col * self.patchStep_x + self.patchSize_x,
-                        :
-                    ]
+                    crop_image = self.image[y1:y2, x1:x2, :]
 
                 augment_list = augment(crop_image)
 
+                if mask_enabled:
+                    if mask_image.ndim == 2:
+                        crop_mask = mask_image[y1:y2, x1:x2]
+                    else:
+                        crop_mask = mask_image[y1:y2, x1:x2, :]
+                    mask_augment_list = augment(crop_mask)
+
                 for aug_idx in self.selected_augment_methods:
-                    name_for_saving = (
+                    img_name = (
                         f"{self.num_of_crop}_{self.lineEdit_outname.text()}"
                         f"_{self.augment_passifixes[aug_idx]}.{self.imageNamePassifix}"
                     )
-                    fullpath_for_saving = os.path.join(self.total_path, name_for_saving)
-                    cv2.imwrite(fullpath_for_saving, augment_list[aug_idx])
-                    self.list_of_saved_names.append(name_for_saving)
+                    cv2.imwrite(os.path.join(total_img_path, img_name), augment_list[aug_idx])
+                    self.list_of_saved_names.append(img_name)
+
+                    if mask_enabled:
+                        mask_name = (
+                            f"{self.num_of_crop}_{self.lineEdit_outname.text()}"
+                            f"_{self.augment_passifixes[aug_idx]}.{self.maskNamePassifix}"
+                        )
+                        cv2.imwrite(os.path.join(total_mask_path, mask_name), mask_augment_list[aug_idx])
 
                 percent = math.floor(self.num_of_crop / (self.steps_in_height * self.steps_in_width) * 100)
                 self.progress_label.setText(f'Patching: {percent}% completed')
@@ -372,14 +444,14 @@ class UI(QMainWindow):
         self.progress_label.setText('Patching complete! Starting dataset split...')
         QApplication.processEvents()
 
-        # (12) Dataset splitting (only if percentages were provided)
+        # (13) Dataset splitting (only if percentages were provided)
         if total_pct == 100:
-            self._split_dataset()
+            self._split_dataset(mask_enabled, total_img_path, total_mask_path)
 
         self.progress_label.setText('All done!')
         QApplication.processEvents()
 
-    def _split_dataset(self):
+    def _split_dataset(self, mask_enabled, total_img_path, total_mask_path):
         '''Shuffles and splits the total patches into Train, Test, Validation folders.'''
 
         randomized = self.list_of_saved_names.copy()
@@ -419,28 +491,46 @@ class UI(QMainWindow):
             num_test  = math.floor((self.Test_val / (self.Test_val + self.Valid_val)) * what_is_left)
             num_valid = what_is_left - num_test
 
-        # Create directories only for non-zero splits
-        train_path = valid_path = test_path = None
-        if num_train > 0:
-            train_path = os.path.join(self.saving_folder_name, "Train")
-            os.mkdir(train_path)
-        if num_test > 0:
-            test_path = os.path.join(self.saving_folder_name, "Test")
-            os.mkdir(test_path)
-        if num_valid > 0:
-            valid_path = os.path.join(self.saving_folder_name, "Validation")
-            os.mkdir(valid_path)
+        # Build split directory paths, creating images/ and masks/ subdirs when mask is enabled
+        splits = [("Train", num_train), ("Test", num_test), ("Validation", num_valid)]
+        split_img_paths  = {}
+        split_mask_paths = {}
+
+        for split_name, count in splits:
+            if count > 0:
+                split_root = os.path.join(self.saving_folder_name, split_name)
+                os.mkdir(split_root)
+                if mask_enabled:
+                    img_dir  = os.path.join(split_root, "images")
+                    mask_dir = os.path.join(split_root, "masks")
+                    os.mkdir(img_dir)
+                    os.mkdir(mask_dir)
+                    split_img_paths[split_name]  = img_dir
+                    split_mask_paths[split_name] = mask_dir
+                else:
+                    split_img_paths[split_name] = split_root
 
         # Copy files into each split directory
         saved_count = 0
 
-        for dest_path, count in [(train_path, num_train), (test_path, num_test), (valid_path, num_valid)]:
+        for split_name, count in splits:
+            if count == 0:
+                continue
+            img_dest  = split_img_paths[split_name]
+            mask_dest = split_mask_paths.get(split_name)
+
             for _ in range(count):
-                file_name = randomized.pop(0)
+                img_name = randomized.pop(0)
                 shutil.copy2(
-                    os.path.join(self.total_path, file_name),
-                    os.path.join(dest_path, file_name)
+                    os.path.join(total_img_path, img_name),
+                    os.path.join(img_dest, img_name)
                 )
+                if mask_enabled:
+                    mask_name = img_name.rsplit(".", 1)[0] + "." + self.maskNamePassifix
+                    shutil.copy2(
+                        os.path.join(total_mask_path, mask_name),
+                        os.path.join(mask_dest, mask_name)
+                    )
                 saved_count += 1
                 percent = math.floor(saved_count / total_number * 100)
                 self.progress_label.setText(f'Dataset split: {percent}% completed')
