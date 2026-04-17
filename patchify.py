@@ -16,7 +16,7 @@ from osgeo import gdal, gdal_array, ogr, osr
 from PyQt5.QtWidgets import (
     QAction, QApplication, QCheckBox, QDialog, QFileDialog, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QRadioButton, QSpinBox, QToolButton, QVBoxLayout
+    QMessageBox, QProgressBar, QPushButton, QRadioButton, QSpinBox, QToolButton, QVBoxLayout
 )
 from PyQt5.QtGui import QIcon
 from qgis.gui import QgsMapLayerComboBox
@@ -494,9 +494,18 @@ class PatchifyDialog(QDialog):
         aug_outer.addLayout(aug_right, 1)
         root.addWidget(gb_aug)
 
-        # --- Progress + Workers ---
+        # --- Progress bar ---
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(14)
+        root.addWidget(self.progress_bar)
+
+        # --- Status label + Workers ---
         bottom_row = QHBoxLayout()
         self.progress_label = QLabel('Patchify is waiting for orders!')
+        self.progress_label.setStyleSheet('font: 8pt "Microsoft JhengHei UI"; color: #444;')
         bottom_row.addWidget(self.progress_label, 1)
         bottom_row.addWidget(QLabel('Workers:'))
         self.spin_workers = QSpinBox()
@@ -956,9 +965,10 @@ class PatchifyDialog(QDialog):
                     names = _process_tile(row, col, **tile_kwargs)
                     self.list_of_saved_names.extend(names)
                     done = row * self.steps_in_width + col + 1
+                    pct  = math.floor(done / total_tiles * 100)
+                    self.progress_bar.setValue(pct)
                     self.progress_label.setText(
-                        f'Patching: {math.floor(done / total_tiles * 100)}%  '
-                        f'({done}/{total_tiles} tiles)'
+                        f'Patching: {pct}%  ({done}/{total_tiles} tiles)'
                     )
                     QApplication.processEvents()
                 if self._cancel_requested:
@@ -978,18 +988,21 @@ class PatchifyDialog(QDialog):
                         break
                     self.list_of_saved_names.extend(future.result())
                     done_count += 1
+                    pct = math.floor(done_count / total_tiles * 100)
+                    self.progress_bar.setValue(pct)
                     self.progress_label.setText(
-                        f'Patching: {math.floor(done_count / total_tiles * 100)}%  '
-                        f'({done_count}/{total_tiles} tiles)'
+                        f'Patching: {pct}%  ({done_count}/{total_tiles} tiles)'
                     )
                     QApplication.processEvents()
 
         if self._cancel_requested:
+            self.progress_bar.setValue(0)
             self.progress_label.setText(
                 f'Cancelled — {len(self.list_of_saved_names):,} tiles saved before stopping.'
             )
             return
 
+        self.progress_bar.setValue(100)
         self.progress_label.setText('Patching complete! Starting dataset split...')
         QApplication.processEvents()
 
@@ -997,6 +1010,7 @@ class PatchifyDialog(QDialog):
         if total_pct == 100:
             self._split_dataset(mask_enabled, total_img_path, total_mask_path)
 
+        self.progress_bar.setValue(0)
         self.progress_label.setText('All done!')
         QApplication.processEvents()
 
@@ -1064,7 +1078,7 @@ class PatchifyDialog(QDialog):
                     mask_name = img_name.rsplit(".", 1)[0] + "." + self.maskNamePassifix
                     shutil.copy2(os.path.join(total_mask_path, mask_name), os.path.join(mask_dest, mask_name))
                 saved_count += 1
-                self.progress_label.setText(
-                    f'Dataset split: {math.floor(saved_count / total_number * 100)}% completed'
-                )
+                pct = math.floor(saved_count / total_number * 100)
+                self.progress_bar.setValue(pct)
+                self.progress_label.setText(f'Dataset split: {pct}% completed')
                 QApplication.processEvents()
