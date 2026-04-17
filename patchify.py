@@ -527,6 +527,12 @@ class PatchifyDialog(QDialog):
         for field in (self.lineEdit_train, self.lineEdit_test, self.lineEdit_valid):
             field.textChanged.connect(self.updateSplitSum)
         self.updateSplitSum()
+        self.lineEdit_winx.textChanged.connect(
+            lambda v: self.lineEdit_stridex.setText(v) if not self.lineEdit_stridex.text() else None
+        )
+        self.lineEdit_winy.textChanged.connect(
+            lambda v: self.lineEdit_stridey.setText(v) if not self.lineEdit_stridey.text() else None
+        )
         for field in (self.lineEdit_winx, self.lineEdit_winy,
                       self.lineEdit_stridex, self.lineEdit_stridey):
             field.textChanged.connect(self.updateTileCount)
