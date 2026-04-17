@@ -508,7 +508,7 @@ class PatchifyDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         self.btn_start  = QPushButton('Start Patching')
-        self.btn_cancel = QPushButton('Cancel')
+        self.btn_cancel = QPushButton('Close')
         self.btn_start.setMinimumWidth(110)
         self.btn_cancel.setMinimumWidth(80)
         btn_row.addWidget(self.btn_start)
@@ -518,7 +518,7 @@ class PatchifyDialog(QDialog):
         # --- Signals & Slots ---
         self.radio_all.toggled.connect(self.allChecked)
         self.radio_custom.toggled.connect(self.customChecked)
-        self.btn_cancel.clicked.connect(self.close)
+        self.btn_cancel.clicked.connect(self.onCancelClicked)
         self.combo_input.layerChanged.connect(self.onImageLayerChanged)
         self.btn_export.clicked.connect(self.pickSavingFolder)
         self.combo_mask.layerChanged.connect(self.onMaskLayerChanged)
@@ -542,14 +542,16 @@ class PatchifyDialog(QDialog):
         self.allChecked()
 
         # Default values
-        self.Train_val           = 0
-        self.Test_val            = 0
-        self.Valid_val           = 0
-        self.list_of_saved_names = []
-        self.mask_filename       = None
-        self.maskNamePassifix    = None
-        self.src_geotransform    = None
-        self.src_projection      = None
+        self.Train_val            = 0
+        self.Test_val             = 0
+        self.Valid_val            = 0
+        self.list_of_saved_names  = []
+        self.mask_filename        = None
+        self.maskNamePassifix     = None
+        self.src_geotransform     = None
+        self.src_projection       = None
+        self._patching            = False
+        self._cancel_requested    = False
 
     # -------------------------------------------------------------------------
     # Slot Functions
@@ -611,6 +613,14 @@ class PatchifyDialog(QDialog):
             self.lbl_mask_info.setStyleSheet(
                 'font: 8pt "Microsoft JhengHei UI"; color: #666; font-style: italic;'
             )
+
+    def onCancelClicked(self):
+        if self._patching:
+            self._cancel_requested = True
+            self.btn_cancel.setEnabled(False)
+            self.progress_label.setText('Cancelling — waiting for in-progress tiles to finish…')
+        else:
+            self.close()
 
     def pickSavingFolder(self):
         self.saving_folder_name = QFileDialog.getExistingDirectory(self, "Select a Folder", "")
@@ -727,7 +737,23 @@ class PatchifyDialog(QDialog):
     # Main Patching Logic
     # -------------------------------------------------------------------------
 
+    def _set_patching_ui(self, active):
+        self.btn_start.setEnabled(not active)
+        self.btn_cancel.setEnabled(True)
+        self.btn_cancel.setText('Cancel' if active else 'Close')
+
     def patchifying(self):
+        self._patching         = True
+        self._cancel_requested = False
+        self._set_patching_ui(True)
+
+        try:
+            self._run_patchifying()
+        finally:
+            self._patching = False
+            self._set_patching_ui(False)
+
+    def _run_patchifying(self):
 
         # (1) Validate mandatory fields
         if not self.image_filename:
@@ -910,6 +936,8 @@ class PatchifyDialog(QDialog):
         if n_workers == 1:
             for row in range(self.steps_in_height):
                 for col in range(self.steps_in_width):
+                    if self._cancel_requested:
+                        break
                     names = _process_tile(row, col, **tile_kwargs)
                     self.list_of_saved_names.extend(names)
                     done = row * self.steps_in_width + col + 1
@@ -918,6 +946,8 @@ class PatchifyDialog(QDialog):
                         f'({done}/{total_tiles} tiles)'
                     )
                     QApplication.processEvents()
+                if self._cancel_requested:
+                    break
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
                 futures = {
@@ -927,6 +957,10 @@ class PatchifyDialog(QDialog):
                 }
                 done_count = 0
                 for future in concurrent.futures.as_completed(futures):
+                    if self._cancel_requested:
+                        for f in futures:
+                            f.cancel()
+                        break
                     self.list_of_saved_names.extend(future.result())
                     done_count += 1
                     self.progress_label.setText(
@@ -934,6 +968,12 @@ class PatchifyDialog(QDialog):
                         f'({done_count}/{total_tiles} tiles)'
                     )
                     QApplication.processEvents()
+
+        if self._cancel_requested:
+            self.progress_label.setText(
+                f'Cancelled — {len(self.list_of_saved_names):,} tiles saved before stopping.'
+            )
+            return
 
         self.progress_label.setText('Patching complete! Starting dataset split...')
         QApplication.processEvents()
