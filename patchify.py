@@ -72,37 +72,50 @@ def _crs_mismatch(raster_layer, vector_layer):
     return ''
 
 
-def _rasterize_vector(layer, ref_gt, ref_proj, ref_w, ref_h,
-                       burn_field=None, burn_value=1):
-    """Rasterize a QgsVectorLayer to a numpy array matching the reference raster grid.
+def _rasterize_tile(mask_source, mask_layer_name, tile_gt, projection,
+                    tile_w, tile_h, burn_field=None, burn_value=1):
+    """Rasterize only the vector features that intersect one tile.
 
-    If the vector CRS differs from the raster CRS the features are reprojected
-    into an in-memory OGR layer before rasterization — no data is written to disk.
+    Each worker calls this independently — no shared state.  A spatial filter
+    limits OGR to features that touch the tile bbox, so large vector datasets
+    are not fully scanned per tile.  CRS reprojection is applied when needed.
     """
-    source = layer.source()
-    if '|layername=' in source:
-        path, lname = source.split('|layername=', 1)
-        vec_ds    = ogr.Open(path)
-        ogr_layer = vec_ds.GetLayerByName(lname) if vec_ds else None
-    else:
-        vec_ds    = ogr.Open(source)
-        ogr_layer = vec_ds.GetLayer() if vec_ds else None
+    vec_ds    = ogr.Open(mask_source)
+    if vec_ds is None:
+        return None
+    ogr_layer = (vec_ds.GetLayerByName(mask_layer_name)
+                 if mask_layer_name else vec_ds.GetLayer())
     if ogr_layer is None:
         return None
 
-    # Reproject to raster CRS when the two differ
     target_srs = osr.SpatialReference()
-    target_srs.ImportFromWkt(ref_proj)
+    target_srs.ImportFromWkt(projection)
     target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
     src_srs = ogr_layer.GetSpatialRef()
+
+    # Tile bounding box in raster CRS (tile_gt[5] is negative → y_min < y_max)
+    x_min = tile_gt[0]
+    x_max = tile_gt[0] + tile_w * tile_gt[1]
+    y_max = tile_gt[3]
+    y_min = tile_gt[3] + tile_h * tile_gt[5]
+
     if src_srs is not None and not src_srs.IsSame(target_srs):
         src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        transform    = osr.CoordinateTransformation(src_srs, target_srs)
-        mem_ogr_drv  = ogr.GetDriverByName('Memory')
-        mem_ogr_ds   = mem_ogr_drv.CreateDataSource('')
-        mem_layer    = mem_ogr_ds.CreateLayer('', srs=target_srs,
-                                               geom_type=ogr_layer.GetGeomType())
-        layer_defn   = ogr_layer.GetLayerDefn()
+        # Transform tile bbox to vector CRS for the spatial pre-filter
+        inv_t   = osr.CoordinateTransformation(target_srs, src_srs)
+        corners = [inv_t.TransformPoint(x, y)[:2]
+                   for x, y in ((x_min, y_min), (x_min, y_max),
+                                (x_max, y_min), (x_max, y_max))]
+        xs, ys  = zip(*corners)
+        ogr_layer.SetSpatialFilterRect(min(xs), min(ys), max(xs), max(ys))
+
+        # Reproject filtered features into raster CRS
+        fwd_t       = osr.CoordinateTransformation(src_srs, target_srs)
+        mem_ogr_drv = ogr.GetDriverByName('Memory')
+        mem_ogr_ds  = mem_ogr_drv.CreateDataSource('')
+        mem_layer   = mem_ogr_ds.CreateLayer('', srs=target_srs,
+                                              geom_type=ogr_layer.GetGeomType())
+        layer_defn  = ogr_layer.GetLayerDefn()
         for i in range(layer_defn.GetFieldCount()):
             mem_layer.CreateField(layer_defn.GetFieldDefn(i))
         out_defn = mem_layer.GetLayerDefn()
@@ -111,18 +124,20 @@ def _rasterize_vector(layer, ref_gt, ref_proj, ref_w, ref_h,
             if geom is None:
                 continue
             geom = geom.Clone()
-            geom.Transform(transform)
+            geom.Transform(fwd_t)
             new_feat = ogr.Feature(out_defn)
             new_feat.SetGeometry(geom)
             for i in range(out_defn.GetFieldCount()):
                 new_feat.SetField(i, feat.GetField(i))
             mem_layer.CreateFeature(new_feat)
         ogr_layer = mem_layer
+    else:
+        ogr_layer.SetSpatialFilterRect(x_min, y_min, x_max, y_max)
 
     mem_drv = gdal.GetDriverByName('MEM')
-    out_ds  = mem_drv.Create('', ref_w, ref_h, 1, gdal.GDT_Byte)
-    out_ds.SetGeoTransform(ref_gt)
-    out_ds.SetProjection(ref_proj)
+    out_ds  = mem_drv.Create('', tile_w, tile_h, 1, gdal.GDT_Byte)
+    out_ds.SetGeoTransform(tile_gt)
+    out_ds.SetProjection(projection)
     out_ds.GetRasterBand(1).Fill(0)
 
     opts  = [f'ATTRIBUTE={burn_field}'] if burn_field else []
@@ -132,13 +147,18 @@ def _rasterize_vector(layer, ref_gt, ref_proj, ref_w, ref_h,
     return out_ds.GetRasterBand(1).ReadAsArray()
 
 
-def _read_image(filepath):
+def _read_raster_meta(filepath):
+    """Open a raster and return metadata without reading any pixel data."""
     ds = gdal.Open(filepath)
     if ds is None:
-        return None, None, None
-    bands = [ds.GetRasterBand(i + 1).ReadAsArray() for i in range(ds.RasterCount)]
-    array = bands[0] if ds.RasterCount == 1 else np.stack(bands, axis=-1)
-    return array, ds.GetGeoTransform(), ds.GetProjection()
+        return None
+    return {
+        'width':        ds.RasterXSize,
+        'height':       ds.RasterYSize,
+        'band_count':   ds.RasterCount,
+        'geotransform': ds.GetGeoTransform(),
+        'projection':   ds.GetProjection(),
+    }
 
 
 def _save_patch(array, filepath, ext, geotransform=None, projection=None):
@@ -170,34 +190,40 @@ def _tile_geotransform(src_gt, x1, y1):
     )
 
 
-def _process_tile(row, col, *, image, mask_image, mask_enabled, foreground_value,
+def _process_tile(row, col, *, img_path, n_bands,
+                  mask_source, mask_layer_name, mask_enabled, foreground_value,
+                  burn_field, burn_value,
                   patchStep_y, patchStep_x, patchSize_y, patchSize_x,
                   selected_methods, aug_suffixes, outname, img_ext, mask_ext,
                   total_img_path, total_mask_path, steps_in_width,
                   georef, src_geotransform, src_projection):
     y1 = row * patchStep_y
-    y2 = y1 + patchSize_y
     x1 = col * patchStep_x
-    x2 = x1 + patchSize_x
     tile_num = row * steps_in_width + col + 1
 
-    crop = image[y1:y2, x1:x2] if image.ndim == 2 else image[y1:y2, x1:x2, :]
+    # Each worker opens its own GDAL handle and reads only its tile window
+    ds    = gdal.Open(img_path)
+    bands = [ds.GetRasterBand(i + 1).ReadAsArray(x1, y1, patchSize_x, patchSize_y)
+             for i in range(n_bands)]
+    crop  = bands[0] if n_bands == 1 else np.stack(bands, axis=-1)
+    ds    = None  # release file handle
+
+    tile_gt  = _tile_geotransform(src_geotransform, x1, y1)
     aug_imgs = augment(crop)
 
     aug_masks = None
     if mask_enabled:
-        crop_mask = mask_image[y1:y2, x1:x2] if mask_image.ndim == 2 else mask_image[y1:y2, x1:x2, :]
-        # Skip tiles that contain no foreground pixels
-        if not np.any(crop_mask == foreground_value):
+        crop_mask = _rasterize_tile(
+            mask_source, mask_layer_name, tile_gt, src_projection,
+            patchSize_x, patchSize_y, burn_field, burn_value,
+        )
+        if crop_mask is None or not np.any(crop_mask == foreground_value):
             return []
         aug_masks = augment(crop_mask)
 
     geo_kw = {}
     if georef and src_geotransform is not None:
-        geo_kw = {
-            'geotransform': _tile_geotransform(src_geotransform, x1, y1),
-            'projection': src_projection,
-        }
+        geo_kw = {'geotransform': tile_gt, 'projection': src_projection}
 
     saved = []
     for idx in selected_methods:
@@ -667,18 +693,18 @@ class PatchifyDialog(QDialog):
                 self.popupIncorrectCharacterInsersion(name)
                 return
 
-        # (3) Read the image
-        self.image, self.src_geotransform, self.src_projection = _read_image(self.image_filename)
-        if self.image is None:
-            self.popupIncorrect("Could not read the selected image file.")
+        # (3) Read raster metadata only — no pixels loaded into memory
+        meta = _read_raster_meta(self.image_filename)
+        if meta is None:
+            self.popupIncorrect("Could not open the selected image file.")
             return
+        self.src_geotransform = meta['geotransform']
+        self.src_projection   = meta['projection']
 
         # (4) Image dimensions
-        if self.image.ndim == 2:
-            self.Height, self.Width = self.image.shape[:2]
-            self.channel = 1
-        else:
-            self.Height, self.Width, self.channel = self.image.shape[:3]
+        self.Width   = meta['width']
+        self.Height  = meta['height']
+        self.channel = meta['band_count']
 
         # (5) Patch size and stride
         self.patchSize_x = int(self.lineEdit_winx.text())
@@ -724,27 +750,19 @@ class PatchifyDialog(QDialog):
             self.popupIncorrectValue()
             return
 
-        # (8) Optionally rasterize the vector mask
-        mask_enabled = self.check_mask_enabled.isChecked()
-        mask_image   = None
+        # (8) Resolve vector mask source — rasterization happens per tile in workers
+        mask_enabled     = self.check_mask_enabled.isChecked()
+        mask_source      = None
+        mask_layer_name  = None
         if mask_enabled:
             if self.mask_layer is None:
                 self.check_for_mandatory_fillings("Mask / Label Image")
                 return
-            self.progress_label.setText('Rasterizing mask layer…')
-            QApplication.processEvents()
-            mask_image = _rasterize_vector(
-                self.mask_layer,
-                self.src_geotransform,
-                self.src_projection,
-                self.Width,
-                self.Height,
-                burn_field  = self.combo_mask_field.currentData(),
-                burn_value  = self.spin_foreground.value(),
-            )
-            if mask_image is None:
-                self.popupIncorrect("Failed to rasterize the mask layer.")
-                return
+            source = self.mask_layer.source()
+            if '|layername=' in source:
+                mask_source, mask_layer_name = source.split('|layername=', 1)
+            else:
+                mask_source = source
 
         # (9) Create Total output folder
         self.total_path = os.path.join(self.saving_folder_name, "Total")
@@ -772,12 +790,16 @@ class PatchifyDialog(QDialog):
         self.steps_in_width  = math.floor((self.Width  - self.patchSize_x) / self.patchStep_x) + 1
         total_tiles = self.steps_in_height * self.steps_in_width
 
-        # Snapshot all UI values before entering threads
+        # Snapshot all values before entering threads — no Qt objects, no shared arrays
         tile_kwargs = dict(
-            image            = self.image,
-            mask_image       = mask_image,
+            img_path         = self.image_filename,
+            n_bands          = self.channel,
+            mask_source      = mask_source,
+            mask_layer_name  = mask_layer_name,
             mask_enabled     = mask_enabled,
             foreground_value = self.spin_foreground.value(),
+            burn_field       = self.combo_mask_field.currentData(),
+            burn_value       = self.spin_foreground.value(),
             patchStep_y      = self.patchStep_y,
             patchStep_x      = self.patchStep_x,
             patchSize_y      = self.patchSize_y,
