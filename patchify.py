@@ -772,8 +772,29 @@ class PatchifyDialog(QDialog):
             else:
                 mask_source = source
 
-        # (9) Create Total output folder
+        # (9) Create Total output folder — guard against existing output from a prior run
         self.total_path = os.path.join(self.saving_folder_name, "Total")
+        existing = [
+            p for p in [self.total_path] + [
+                os.path.join(self.saving_folder_name, n)
+                for n in ('Train', 'Test', 'Validation')
+            ]
+            if os.path.exists(p)
+        ]
+        if existing:
+            names = ',  '.join(os.path.basename(p) for p in existing)
+            reply = QMessageBox.question(
+                self, 'Overwrite existing output?',
+                f'The following folders already exist in the export directory:\n\n'
+                f'  {names}\n\n'
+                'They will be deleted and recreated. Continue?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            for p in existing:
+                shutil.rmtree(p)
         os.mkdir(self.total_path)
         if mask_enabled:
             total_img_path  = os.path.join(self.total_path, "images")
