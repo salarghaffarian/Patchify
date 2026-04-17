@@ -675,9 +675,17 @@ class PatchifyDialog(QDialog):
         if not self.image_filename:
             self.check_for_mandatory_fillings("Input Image")
             return
-        if not self.lineEdit_export.text():
+        export_folder = self.lineEdit_export.text().strip()
+        if not export_folder:
             self.check_for_mandatory_fillings("Export Folder")
             return
+        if not os.path.isdir(export_folder):
+            self.popupIncorrect(
+                f'Export folder does not exist:\n{export_folder}\n\n'
+                'Please select a valid directory.'
+            )
+            return
+        self.saving_folder_name = export_folder
         if not self.lineEdit_outname.text():
             self.check_for_mandatory_fillings("Base Name")
             return
