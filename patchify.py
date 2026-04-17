@@ -158,6 +158,7 @@ def _read_raster_meta(filepath):
         'band_count':   ds.RasterCount,
         'geotransform': ds.GetGeoTransform(),
         'projection':   ds.GetProjection(),
+        'nodata':       ds.GetRasterBand(1).GetNoDataValue(),
     }
 
 
@@ -190,7 +191,7 @@ def _tile_geotransform(src_gt, x1, y1):
     )
 
 
-def _process_tile(row, col, *, img_path, n_bands,
+def _process_tile(row, col, *, img_path, n_bands, nodata_value,
                   mask_source, mask_layer_name, mask_enabled, foreground_value,
                   burn_field, burn_value,
                   patchStep_y, patchStep_x, patchSize_y, patchSize_x,
@@ -207,6 +208,13 @@ def _process_tile(row, col, *, img_path, n_bands,
              for i in range(n_bands)]
     crop  = bands[0] if n_bands == 1 else np.stack(bands, axis=-1)
     ds    = None  # release file handle
+
+    # Skip tiles that are entirely nodata (e.g. black border after reprojection)
+    if nodata_value is not None:
+        all_nodata = (np.all(np.isnan(crop)) if math.isnan(nodata_value)
+                      else np.all(crop == nodata_value))
+        if all_nodata:
+            return []
 
     tile_gt  = _tile_geotransform(src_geotransform, x1, y1)
     aug_imgs = augment(crop)
@@ -913,6 +921,7 @@ class PatchifyDialog(QDialog):
         tile_kwargs = dict(
             img_path         = self.image_filename,
             n_bands          = self.channel,
+            nodata_value     = meta['nodata'],
             mask_source      = mask_source,
             mask_layer_name  = mask_layer_name,
             mask_enabled     = mask_enabled,
