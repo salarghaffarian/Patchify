@@ -1,30 +1,100 @@
-import numpy as np
-from osgeo import gdal, gdal_array
-from PyQt5.QtWidgets import (
-    QAction, QApplication, QCheckBox, QDialog, QFileDialog,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QRadioButton, QToolButton, QVBoxLayout
-)
-from PyQt5.QtGui import QIcon
+import concurrent.futures
 import math
 import os
-import shutil
 import random
+import shutil
+
+# Reserve one logical core for the QGIS UI thread and OS scheduler.
+# The default starts at half the available cores — conservative enough not to
+# overwhelm the machine on first use, yet still meaningfully parallel.
+_CPU_COUNT       = os.cpu_count() or 1
+_MAX_WORKERS     = max(1, _CPU_COUNT - 1)
+_DEFAULT_WORKERS = max(1, _CPU_COUNT // 2)
+
+import numpy as np
+from osgeo import gdal, gdal_array, ogr
+from PyQt5.QtWidgets import (
+    QAction, QApplication, QCheckBox, QDialog, QFileDialog, QFrame,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QRadioButton, QSpinBox, QToolButton, QVBoxLayout
+)
+from PyQt5.QtGui import QIcon
+from qgis.gui import QgsMapLayerComboBox
+from qgis.core import QgsMapLayerProxyModel, QgsWkbTypes
 from .augment import augment
 
 
 _EXT_TO_DRIVER = {'tif': 'GTiff', 'tiff': 'GTiff', 'png': 'PNG', 'jpg': 'JPEG', 'jpeg': 'JPEG'}
 
 
+def _image_info(filepath):
+    """Return a one-line metadata string for an image without reading pixel data."""
+    ds = gdal.Open(filepath)
+    if ds is None:
+        return ''
+    w, h   = ds.RasterXSize, ds.RasterYSize
+    bands  = ds.RasterCount
+    dtype  = gdal.GetDataTypeName(ds.GetRasterBand(1).DataType)
+    gt     = ds.GetGeoTransform()
+    band_s = f'{bands} band{"s" if bands > 1 else ""}'
+    px_s   = ''
+    # Only show pixel size when the image has a real georeference (not default identity)
+    if gt and not (gt[0] == 0.0 and gt[1] == 1.0 and gt[3] == 0.0):
+        pw, ph = abs(gt[1]), abs(gt[5])
+        px_s = f'  |  {pw:.4g} × {ph:.4g} m/px' if pw != ph else f'  |  {pw:.4g} m/px'
+    return f'{w:,} × {h:,} px  |  {band_s}  |  {dtype}{px_s}'
+
+
+def _vector_mask_info(layer):
+    """Return a one-line metadata string for a vector mask layer."""
+    geom_s     = QgsWkbTypes.displayString(layer.wkbType())
+    count      = layer.featureCount()
+    num_fields = [f.name() for f in layer.fields() if f.isNumeric()]
+    if num_fields:
+        listed = ', '.join(num_fields[:6]) + ('…' if len(num_fields) > 6 else '')
+        f_s = f'Numeric fields: {listed}'
+    else:
+        f_s = 'No numeric fields — burn value will be used'
+    return f'{geom_s}  |  {count:,} features  |  {f_s}'
+
+
+def _rasterize_vector(layer, ref_gt, ref_proj, ref_w, ref_h,
+                       burn_field=None, burn_value=1):
+    """Rasterize a QgsVectorLayer to a numpy array matching the reference raster grid."""
+    source = layer.source()
+    if '|layername=' in source:
+        path, lname = source.split('|layername=', 1)
+        vec_ds    = ogr.Open(path)
+        ogr_layer = vec_ds.GetLayerByName(lname) if vec_ds else None
+    else:
+        vec_ds    = ogr.Open(source)
+        ogr_layer = vec_ds.GetLayer() if vec_ds else None
+    if ogr_layer is None:
+        return None
+
+    mem_drv = gdal.GetDriverByName('MEM')
+    out_ds  = mem_drv.Create('', ref_w, ref_h, 1, gdal.GDT_Byte)
+    out_ds.SetGeoTransform(ref_gt)
+    out_ds.SetProjection(ref_proj)
+    out_ds.GetRasterBand(1).Fill(0)
+
+    opts  = [f'ATTRIBUTE={burn_field}'] if burn_field else []
+    burns = [] if burn_field else [burn_value]
+    gdal.RasterizeLayer(out_ds, [1], ogr_layer, burn_values=burns, options=opts)
+    out_ds.FlushCache()
+    return out_ds.GetRasterBand(1).ReadAsArray()
+
+
 def _read_image(filepath):
     ds = gdal.Open(filepath)
     if ds is None:
-        return None
+        return None, None, None
     bands = [ds.GetRasterBand(i + 1).ReadAsArray() for i in range(ds.RasterCount)]
-    return bands[0] if ds.RasterCount == 1 else np.stack(bands, axis=-1)
+    array = bands[0] if ds.RasterCount == 1 else np.stack(bands, axis=-1)
+    return array, ds.GetGeoTransform(), ds.GetProjection()
 
 
-def _save_patch(array, filepath, ext):
+def _save_patch(array, filepath, ext, geotransform=None, projection=None):
     array = np.ascontiguousarray(array)
     driver = gdal.GetDriverByName(_EXT_TO_DRIVER.get(ext.lower(), 'GTiff'))
     h, w = array.shape[:2]
@@ -36,8 +106,62 @@ def _save_patch(array, filepath, ext):
     else:
         for b in range(n_bands):
             ds.GetRasterBand(b + 1).WriteArray(array[:, :, b])
+    if geotransform is not None:
+        ds.SetGeoTransform(geotransform)
+    if projection:
+        ds.SetProjection(projection)
     ds.FlushCache()
     ds = None
+
+
+def _tile_geotransform(src_gt, x1, y1):
+    return (
+        src_gt[0] + x1 * src_gt[1] + y1 * src_gt[2],
+        src_gt[1], src_gt[2],
+        src_gt[3] + x1 * src_gt[4] + y1 * src_gt[5],
+        src_gt[4], src_gt[5],
+    )
+
+
+def _process_tile(row, col, *, image, mask_image, mask_enabled, foreground_value,
+                  patchStep_y, patchStep_x, patchSize_y, patchSize_x,
+                  selected_methods, aug_suffixes, outname, img_ext, mask_ext,
+                  total_img_path, total_mask_path, steps_in_width,
+                  georef, src_geotransform, src_projection):
+    y1 = row * patchStep_y
+    y2 = y1 + patchSize_y
+    x1 = col * patchStep_x
+    x2 = x1 + patchSize_x
+    tile_num = row * steps_in_width + col + 1
+
+    crop = image[y1:y2, x1:x2] if image.ndim == 2 else image[y1:y2, x1:x2, :]
+    aug_imgs = augment(crop)
+
+    aug_masks = None
+    if mask_enabled:
+        crop_mask = mask_image[y1:y2, x1:x2] if mask_image.ndim == 2 else mask_image[y1:y2, x1:x2, :]
+        # Skip tiles that contain no foreground pixels
+        if not np.any(crop_mask == foreground_value):
+            return []
+        aug_masks = augment(crop_mask)
+
+    geo_kw = {}
+    if georef and src_geotransform is not None:
+        geo_kw = {
+            'geotransform': _tile_geotransform(src_geotransform, x1, y1),
+            'projection': src_projection,
+        }
+
+    saved = []
+    for idx in selected_methods:
+        img_name = f"{tile_num}_{outname}_{aug_suffixes[idx]}.{img_ext}"
+        _save_patch(aug_imgs[idx], os.path.join(total_img_path, img_name), img_ext, **geo_kw)
+        saved.append(img_name)
+        if mask_enabled and aug_masks is not None:
+            msk_name = f"{tile_num}_{outname}_{aug_suffixes[idx]}.{mask_ext}"
+            _save_patch(aug_masks[idx], os.path.join(total_mask_path, msk_name), mask_ext)
+
+    return saved
 
 
 # -----------------------------------------------------------------------------
@@ -60,6 +184,9 @@ class PatchifyPlugin:
     def unload(self):
         self.iface.removePluginRasterMenu('Patchify', self.action)
         self.iface.removeToolBarIcon(self.action)
+        if self.dialog is not None:
+            self.dialog.close()
+            self.dialog = None
 
     def run(self):
         if self.dialog is None:
@@ -79,60 +206,97 @@ class PatchifyDialog(QDialog):
 
         self.setWindowTitle('Patchify')
         self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), 'crop_icon.png')))
-        self.setMinimumWidth(660)
+        self.setMinimumWidth(680)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 12, 16, 12)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
         # --- Title ---
         title_label = QLabel('Patchify App')
-        title_label.setStyleSheet('font: 16pt "Segoe Print";')
+        title_label.setStyleSheet('font: 18pt "Segoe Print"; color: #2c6fad;')
         root.addWidget(title_label)
 
-        # --- I/O section ---
-        lbl_style = 'font: 10pt "Microsoft JhengHei UI";'
+        # --- Source & Export ---
+        lbl_style = 'font: 10pt "Microsoft JhengHei UI"; font-weight: bold;'
 
-        io_layout = QGridLayout()
+        gb_io = QGroupBox('Source && Export')
+        io_layout = QGridLayout(gb_io)
         io_layout.setColumnStretch(1, 1)
+        io_layout.setVerticalSpacing(6)
+        io_layout.setHorizontalSpacing(8)
 
+        info_style = 'font: 8pt "Microsoft JhengHei UI"; color: #2c6fad; font-style: italic;'
+
+        # Input image — raster layers from QGIS layer panel
         label_input = QLabel('Input Image')
         label_input.setStyleSheet(lbl_style)
-        self.lineEdit_input = QLineEdit()
-        self.btn_input = QToolButton()
-        self.btn_input.setText('...')
+        self.combo_input = QgsMapLayerComboBox()
+        self.combo_input.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        self.lbl_image_info = QLabel('')
+        self.lbl_image_info.setStyleSheet(info_style)
 
+        # Export folder — still a plain folder picker
         label_export = QLabel('Export Folder')
         label_export.setStyleSheet(lbl_style)
         self.lineEdit_export = QLineEdit()
         self.btn_export = QToolButton()
         self.btn_export.setText('...')
 
-        # Mask row — checkbox acts as label; inputs disabled until checked
-        self.check_mask_enabled = QCheckBox('Mask / Label Image  (binary & multi-class supported)')
+        # Mask row — vector layers from QGIS layer panel; disabled until checkbox ticked
+        self.check_mask_enabled = QCheckBox('Mask / Label Image')
         self.check_mask_enabled.setStyleSheet(lbl_style)
-        self.lineEdit_mask = QLineEdit()
-        self.lineEdit_mask.setEnabled(False)
-        self.btn_mask = QToolButton()
-        self.btn_mask.setText('...')
-        self.btn_mask.setEnabled(False)
+        self.combo_mask = QgsMapLayerComboBox()
+        self.combo_mask.setFilters(QgsMapLayerProxyModel.VectorLayer)
+        self.combo_mask.setEnabled(False)
+        # Burn-field selector — populated from the vector layer's numeric fields
+        from PyQt5.QtWidgets import QComboBox
+        self.lbl_burn_field = QLabel('Attribute Field:')
+        self.lbl_burn_field.setStyleSheet('font: 9pt "Microsoft JhengHei UI"; color: #444;')
+        self.lbl_burn_field.setEnabled(False)
+        self.combo_mask_field = QComboBox()
+        self.combo_mask_field.setEnabled(False)
+        self.combo_mask_field.setToolTip(
+            'Field whose values are burned into the raster mask.\n'
+            'Choose "— burn value —" to use the Binary Foreground Value for all features.'
+        )
+        self.lbl_mask_info = QLabel('Select a vector layer to use as mask / label')
+        self.lbl_mask_info.setStyleSheet('font: 8pt "Microsoft JhengHei UI"; color: #666; font-style: italic;')
+
+        # Foreground value — used to skip tiles with no foreground pixels (binary masks)
+        self.lbl_foreground = QLabel('Binary Foreground Value (1–255):')
+        self.lbl_foreground.setStyleSheet('font: 9pt "Microsoft JhengHei UI"; color: #444;')
+        self.lbl_foreground.setEnabled(False)
+        self.spin_foreground = QSpinBox()
+        self.spin_foreground.setRange(1, 255)
+        self.spin_foreground.setValue(255)
+        self.spin_foreground.setMaximumWidth(60)
+        self.spin_foreground.setEnabled(False)
 
         io_layout.addWidget(label_input,             0, 0)
-        io_layout.addWidget(self.lineEdit_input,     0, 1)
-        io_layout.addWidget(self.btn_input,          0, 2)
-        io_layout.addWidget(label_export,            1, 0)
-        io_layout.addWidget(self.lineEdit_export,    1, 1)
-        io_layout.addWidget(self.btn_export,         1, 2)
-        io_layout.addWidget(self.check_mask_enabled, 2, 0)
-        io_layout.addWidget(self.lineEdit_mask,      2, 1)
-        io_layout.addWidget(self.btn_mask,           2, 2)
-        root.addLayout(io_layout)
+        io_layout.addWidget(self.combo_input,        0, 1, 1, 2)
+        io_layout.addWidget(self.lbl_image_info,     1, 0, 1, 3)
+        io_layout.addWidget(label_export,            2, 0)
+        io_layout.addWidget(self.lineEdit_export,    2, 1)
+        io_layout.addWidget(self.btn_export,         2, 2)
+        io_layout.addWidget(self.check_mask_enabled, 3, 0)
+        io_layout.addWidget(self.combo_mask,         3, 1, 1, 2)
+        io_layout.addWidget(self.lbl_burn_field,     4, 0)
+        io_layout.addWidget(self.combo_mask_field,   4, 1, 1, 2)
+        io_layout.addWidget(self.lbl_mask_info,      5, 0, 1, 3)
+        io_layout.addWidget(self.lbl_foreground,     6, 0)
+        io_layout.addWidget(self.spin_foreground,    6, 1)
+        root.addWidget(gb_io)
 
-        # --- Middle row: Cropping Parameters + Output Options ---
+        # --- Middle row: Patch Configuration + Dataset Split ---
         mid_row = QHBoxLayout()
+        mid_row.setSpacing(10)
 
-        gb_crop = QGroupBox('Cropping Parameters:')
+        gb_crop = QGroupBox('Patch Configuration')
         crop_layout = QGridLayout(gb_crop)
+        crop_layout.setVerticalSpacing(10)
+        crop_layout.setHorizontalSpacing(6)
+
         self.lineEdit_winx = QLineEdit()
         self.lineEdit_winx.setMaximumWidth(55)
         self.lineEdit_winy = QLineEdit()
@@ -141,71 +305,127 @@ class PatchifyDialog(QDialog):
         self.lineEdit_stridex.setMaximumWidth(55)
         self.lineEdit_stridey = QLineEdit()
         self.lineEdit_stridey.setMaximumWidth(55)
-        crop_layout.addWidget(QLabel('Window Size:'), 0, 0)
-        crop_layout.addWidget(QLabel('X'),            0, 1)
-        crop_layout.addWidget(self.lineEdit_winx,     0, 2)
-        crop_layout.addWidget(QLabel('Y'),            0, 3)
-        crop_layout.addWidget(self.lineEdit_winy,     0, 4)
-        crop_layout.addWidget(QLabel('Stride:'),      1, 0)
-        crop_layout.addWidget(QLabel('X'),            1, 1)
-        crop_layout.addWidget(self.lineEdit_stridex,  1, 2)
-        crop_layout.addWidget(QLabel('Y'),            1, 3)
-        crop_layout.addWidget(self.lineEdit_stridey,  1, 4)
+
+        crop_layout.addWidget(QLabel('Tile Size:'),       0, 0)
+        crop_layout.addWidget(QLabel('X'),                0, 1)
+        crop_layout.addWidget(self.lineEdit_winx,         0, 2)
+        crop_layout.addWidget(QLabel('Y'),                0, 3)
+        crop_layout.addWidget(self.lineEdit_winy,         0, 4)
+        crop_layout.addWidget(QLabel('Stride:'),          1, 0)
+        crop_layout.addWidget(QLabel('X'),                1, 1)
+        crop_layout.addWidget(self.lineEdit_stridex,      1, 2)
+        crop_layout.addWidget(QLabel('Y'),                1, 3)
+        crop_layout.addWidget(self.lineEdit_stridey,      1, 4)
+
+        self.radio_georef = QRadioButton('Georeferenced')
+        self.radio_array  = QRadioButton('Array Only')
+        self.radio_georef.setChecked(True)
+        save_mode_row = QHBoxLayout()
+        save_mode_row.addWidget(self.radio_georef)
+        save_mode_row.addWidget(self.radio_array)
+        save_mode_row.addStretch()
+        crop_layout.addWidget(QLabel('Save As:'), 2, 0)
+        crop_layout.addLayout(save_mode_row,      2, 1, 1, 4)
+        crop_layout.setRowStretch(3, 1)
         mid_row.addWidget(gb_crop)
 
-        gb_output = QGroupBox('Output Options:')
+        gb_output = QGroupBox('Dataset Split')
         out_layout = QGridLayout(gb_output)
         out_layout.setColumnStretch(1, 1)
+        out_layout.setVerticalSpacing(8)
         self.lineEdit_outname = QLineEdit()
         self.lineEdit_train   = QLineEdit()
         self.lineEdit_train.setMaximumWidth(60)
+        self.lineEdit_train.setText('70')
         self.lineEdit_test    = QLineEdit()
         self.lineEdit_test.setMaximumWidth(60)
+        self.lineEdit_test.setText('20')
         self.lineEdit_valid   = QLineEdit()
         self.lineEdit_valid.setMaximumWidth(60)
-        out_layout.addWidget(QLabel('Output Name:'),          0, 0)
+        self.lineEdit_valid.setText('10')
+
+        self.lbl_split_sum = QLabel()
+        self.lbl_split_sum.setStyleSheet('font: 8pt "Microsoft JhengHei UI";')
+
+        out_layout.addWidget(QLabel('Base Name:'),            0, 0)
         out_layout.addWidget(self.lineEdit_outname,           0, 1)
-        out_layout.addWidget(QLabel('Training Percentage'),   1, 0)
+        out_layout.addWidget(QLabel('Training %'),            1, 0)
         out_layout.addWidget(self.lineEdit_train,             1, 1)
-        out_layout.addWidget(QLabel('Testing Percentage'),    2, 0)
+        out_layout.addWidget(QLabel('Testing %'),             2, 0)
         out_layout.addWidget(self.lineEdit_test,              2, 1)
-        out_layout.addWidget(QLabel('Validation Percentage'), 3, 0)
+        out_layout.addWidget(QLabel('Validation %'),          3, 0)
         out_layout.addWidget(self.lineEdit_valid,             3, 1)
+        out_layout.addWidget(self.lbl_split_sum,              4, 0, 1, 2)
         mid_row.addWidget(gb_output)
         root.addLayout(mid_row)
 
-        # --- Augmentation Options ---
-        gb_aug = QGroupBox('Augmentation Options:')
-        aug_layout = QGridLayout(gb_aug)
+        # --- Data Augmentation ---
+        gb_aug = QGroupBox('Data Augmentation')
+        aug_outer = QHBoxLayout(gb_aug)
+        aug_outer.setSpacing(12)
+
+        aug_left = QVBoxLayout()
+        aug_left.setSpacing(8)
         self.radio_all    = QRadioButton('All')
         self.radio_custom = QRadioButton('Custom Selection')
+        aug_left.addWidget(self.radio_all)
+        aug_left.addWidget(self.radio_custom)
+        aug_left.addStretch()
+
+        sep_aug = QFrame()
+        sep_aug.setFrameShape(QFrame.VLine)
+        sep_aug.setFrameShadow(QFrame.Sunken)
+
+        aug_right = QGridLayout()
+        aug_right.setHorizontalSpacing(20)
+        aug_right.setVerticalSpacing(6)
         self.check_original  = QCheckBox('Original Image')
-        self.check_rotate90  = QCheckBox('Rotate 90 degrees')
-        self.check_rotate180 = QCheckBox('Rotate 180 degrees')
-        self.check_rotate270 = QCheckBox('Rotate 270 degrees')
+        self.check_rotate90  = QCheckBox('Rotate 90°')
+        self.check_rotate180 = QCheckBox('Rotate 180°')
+        self.check_rotate270 = QCheckBox('Rotate 270°')
         self.check_flipv     = QCheckBox('Flip Vertically')
         self.check_fliph     = QCheckBox('Flip Horizontally')
-        self.check_flipvh    = QCheckBox('Flip Vertically and Horizontally')
-        aug_layout.addWidget(self.radio_all,       0, 0)
-        aug_layout.addWidget(self.radio_custom,    1, 0)
-        aug_layout.addWidget(self.check_original,  0, 2)
-        aug_layout.addWidget(self.check_rotate90,  1, 2)
-        aug_layout.addWidget(self.check_rotate180, 2, 2)
-        aug_layout.addWidget(self.check_rotate270, 3, 2)
-        aug_layout.addWidget(self.check_flipv,     1, 3)
-        aug_layout.addWidget(self.check_fliph,     2, 3)
-        aug_layout.addWidget(self.check_flipvh,    3, 3)
+        self.check_flipvh    = QCheckBox('Flip Vertically && Horizontally')
+        aug_right.addWidget(self.check_original,  0, 0)
+        aug_right.addWidget(self.check_rotate90,  1, 0)
+        aug_right.addWidget(self.check_rotate180, 2, 0)
+        aug_right.addWidget(self.check_rotate270, 3, 0)
+        aug_right.addWidget(self.check_flipv,     1, 1)
+        aug_right.addWidget(self.check_fliph,     2, 1)
+        aug_right.addWidget(self.check_flipvh,    3, 1)
+        aug_right.setColumnStretch(0, 1)
+        aug_right.setColumnStretch(1, 1)
+
+        aug_outer.addLayout(aug_left)
+        aug_outer.addWidget(sep_aug)
+        aug_outer.addLayout(aug_right, 1)
         root.addWidget(gb_aug)
 
-        # --- Progress label ---
+        # --- Progress + Workers ---
+        bottom_row = QHBoxLayout()
         self.progress_label = QLabel('Patchify is waiting for orders!')
-        root.addWidget(self.progress_label)
+        bottom_row.addWidget(self.progress_label, 1)
+        bottom_row.addWidget(QLabel('Workers:'))
+        self.spin_workers = QSpinBox()
+        self.spin_workers.setRange(1, _MAX_WORKERS)
+        self.spin_workers.setValue(_DEFAULT_WORKERS)
+        self.spin_workers.setMaximumWidth(55)
+        self.spin_workers.setToolTip(
+            f'Parallel threads for tile processing.\n'
+            f'Max {_MAX_WORKERS} of {_CPU_COUNT} logical cores '
+            f'(1 reserved for QGIS).\n'
+            f'Default: {_DEFAULT_WORKERS} (half available).'
+        )
+        bottom_row.addWidget(self.spin_workers)
+        root.addLayout(bottom_row)
 
         # --- Action buttons ---
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         self.btn_start  = QPushButton('Start Patching')
         self.btn_cancel = QPushButton('Cancel')
+        self.btn_start.setMinimumWidth(110)
+        self.btn_cancel.setMinimumWidth(80)
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_cancel)
         root.addLayout(btn_row)
@@ -214,11 +434,16 @@ class PatchifyDialog(QDialog):
         self.radio_all.toggled.connect(self.allChecked)
         self.radio_custom.toggled.connect(self.customChecked)
         self.btn_cancel.clicked.connect(self.close)
-        self.btn_input.clicked.connect(self.pickImage)
+        self.combo_input.layerChanged.connect(self.onImageLayerChanged)
         self.btn_export.clicked.connect(self.pickSavingFolder)
-        self.btn_mask.clicked.connect(self.pickMaskImage)
+        self.combo_mask.layerChanged.connect(self.onMaskLayerChanged)
         self.check_mask_enabled.toggled.connect(self.toggleMaskInput)
         self.btn_start.clicked.connect(self.patchifying)
+        for field in (self.lineEdit_train, self.lineEdit_test, self.lineEdit_valid):
+            field.textChanged.connect(self.updateSplitSum)
+        self.updateSplitSum()
+        # Seed info labels from whatever layer is already selected on open
+        self.onImageLayerChanged(self.combo_input.currentLayer())
 
         # Default augmentation state
         self.radio_all.setChecked(True)
@@ -231,6 +456,8 @@ class PatchifyDialog(QDialog):
         self.list_of_saved_names = []
         self.mask_filename       = None
         self.maskNamePassifix    = None
+        self.src_geotransform    = None
+        self.src_projection      = None
 
     # -------------------------------------------------------------------------
     # Slot Functions
@@ -248,36 +475,75 @@ class PatchifyDialog(QDialog):
             cb.setChecked(False)
             cb.setEnabled(True)
 
-    def pickImage(self):
-        self.image_filename, _ = QFileDialog.getOpenFileName(
-            self, "Select an Image", "",
-            "tif file (*.tif);;png file (*.png);;jpg file (*.jpg)"
-        )
-        if self.image_filename:
-            self.imageNamePassifix = self.image_filename.split(".")[-1]
-            self.lineEdit_input.setText(self.image_filename)
+    def onImageLayerChanged(self, layer):
+        if layer:
+            self.image_filename    = layer.source()
+            self.imageNamePassifix = self.image_filename.rsplit('.', 1)[-1]
+            self.lbl_image_info.setText(_image_info(self.image_filename))
+        else:
+            self.image_filename    = None
+            self.imageNamePassifix = None
+            self.lbl_image_info.setText('')
+
+    def onMaskLayerChanged(self, layer):
+        self.combo_mask_field.clear()
+        self.combo_mask_field.addItem('— burn value (binary) —', None)
+        if layer and self.check_mask_enabled.isChecked():
+            self.mask_layer       = layer
+            self.maskNamePassifix = 'tif'   # rasterized output is always GeoTIFF
+            for field in layer.fields():
+                if field.isNumeric():
+                    self.combo_mask_field.addItem(field.name(), field.name())
+            self.lbl_mask_info.setText(_vector_mask_info(layer))
+            self.lbl_mask_info.setStyleSheet(
+                'font: 8pt "Microsoft JhengHei UI"; color: #2c6fad; font-style: italic;'
+            )
+        else:
+            self.mask_layer       = None
+            self.maskNamePassifix = None
+            self.lbl_mask_info.setText('Select a vector layer to use as mask / label')
+            self.lbl_mask_info.setStyleSheet(
+                'font: 8pt "Microsoft JhengHei UI"; color: #666; font-style: italic;'
+            )
 
     def pickSavingFolder(self):
         self.saving_folder_name = QFileDialog.getExistingDirectory(self, "Select a Folder", "")
         if self.saving_folder_name:
             self.lineEdit_export.setText(self.saving_folder_name)
 
-    def toggleMaskInput(self, checked):
-        self.lineEdit_mask.setEnabled(checked)
-        self.btn_mask.setEnabled(checked)
-        if not checked:
-            self.lineEdit_mask.clear()
-            self.mask_filename = None
+    def updateSplitSum(self):
+        total = 0
+        for field in (self.lineEdit_train, self.lineEdit_test, self.lineEdit_valid):
+            text = field.text().strip()
+            if text.isnumeric():
+                total += int(text)
+        if total == 0:
+            self.lbl_split_sum.setText('Leave all three empty to skip splitting.')
+            self.lbl_split_sum.setStyleSheet('font: 8pt "Microsoft JhengHei UI"; color: #888;')
+        elif total == 100:
+            self.lbl_split_sum.setText(f'Sum: {total}% \u2713')
+            self.lbl_split_sum.setStyleSheet('font: 8pt "Microsoft JhengHei UI"; color: #2a7a2a; font-weight: bold;')
+        else:
+            self.lbl_split_sum.setText(f'Sum: {total}%  \u2014  must equal 100%')
+            self.lbl_split_sum.setStyleSheet('font: 8pt "Microsoft JhengHei UI"; color: #b94040; font-weight: bold;')
 
-    def pickMaskImage(self):
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "Select a Mask / Label Image", "",
-            "tif file (*.tif);;png file (*.png);;jpg file (*.jpg)"
-        )
-        if filename:
-            self.mask_filename    = filename
-            self.maskNamePassifix = filename.split(".")[-1]
-            self.lineEdit_mask.setText(filename)
+    def toggleMaskInput(self, checked):
+        self.combo_mask.setEnabled(checked)
+        self.lbl_burn_field.setEnabled(checked)
+        self.combo_mask_field.setEnabled(checked)
+        self.lbl_foreground.setEnabled(checked)
+        self.spin_foreground.setEnabled(checked)
+        if checked:
+            self.onMaskLayerChanged(self.combo_mask.currentLayer())
+        else:
+            self.mask_layer       = None
+            self.maskNamePassifix = None
+            self.combo_mask_field.clear()
+            self.combo_mask_field.addItem('— burn value (binary) —', None)
+            self.lbl_mask_info.setText('Select a vector layer to use as mask / label')
+            self.lbl_mask_info.setStyleSheet(
+                'font: 8pt "Microsoft JhengHei UI"; color: #666; font-style: italic;'
+            )
 
     # -------------------------------------------------------------------------
     # Popup Helpers
@@ -322,20 +588,20 @@ class PatchifyDialog(QDialog):
     def patchifying(self):
 
         # (1) Validate mandatory fields
-        if not self.lineEdit_input.text():
+        if not self.image_filename:
             self.check_for_mandatory_fillings("Input Image")
             return
         if not self.lineEdit_export.text():
             self.check_for_mandatory_fillings("Export Folder")
             return
         if not self.lineEdit_outname.text():
-            self.check_for_mandatory_fillings("Output Name")
+            self.check_for_mandatory_fillings("Base Name")
             return
 
-        # (2) Validate window size and stride fields — must be positive integers
+        # (2) Validate tile size and stride — must be positive integers
         for field, name in [
-            (self.lineEdit_winx,    'Window Size X'),
-            (self.lineEdit_winy,    'Window Size Y'),
+            (self.lineEdit_winx,    'Tile Size X'),
+            (self.lineEdit_winy,    'Tile Size Y'),
             (self.lineEdit_stridex, 'Stride X'),
             (self.lineEdit_stridey, 'Stride Y'),
         ]:
@@ -344,7 +610,7 @@ class PatchifyDialog(QDialog):
                 return
 
         # (3) Read the image
-        self.image = _read_image(self.image_filename)
+        self.image, self.src_geotransform, self.src_projection = _read_image(self.image_filename)
         if self.image is None:
             self.popupIncorrect("Could not read the selected image file.")
             return
@@ -400,22 +666,26 @@ class PatchifyDialog(QDialog):
             self.popupIncorrectValue()
             return
 
-        # (8) Optionally read and validate mask image
+        # (8) Optionally rasterize the vector mask
         mask_enabled = self.check_mask_enabled.isChecked()
         mask_image   = None
         if mask_enabled:
-            if not self.lineEdit_mask.text():
+            if self.mask_layer is None:
                 self.check_for_mandatory_fillings("Mask / Label Image")
                 return
-            mask_image = _read_image(self.mask_filename)
+            self.progress_label.setText('Rasterizing mask layer…')
+            QApplication.processEvents()
+            mask_image = _rasterize_vector(
+                self.mask_layer,
+                self.src_geotransform,
+                self.src_projection,
+                self.Width,
+                self.Height,
+                burn_field  = self.combo_mask_field.currentData(),
+                burn_value  = self.spin_foreground.value(),
+            )
             if mask_image is None:
-                self.popupIncorrect("Could not read the selected mask image file.")
-                return
-            if mask_image.shape[:2] != (self.Height, self.Width):
-                self.popupIncorrect(
-                    f"Mask size ({mask_image.shape[1]} x {mask_image.shape[0]}) "
-                    f"does not match image size ({self.Width} x {self.Height})."
-                )
+                self.popupIncorrect("Failed to rasterize the mask layer.")
                 return
 
         # (9) Create Total output folder
@@ -430,61 +700,78 @@ class PatchifyDialog(QDialog):
             total_img_path  = self.total_path
             total_mask_path = None
 
-        # (10) Validate patch size against image size
+        # (10) Validate tile size against image size
         if self.patchSize_y > self.Height or self.patchSize_x > self.Width:
             self.popupIncorrect(
-                "Patch size cannot exceed the image size!\n"
+                "Tile size cannot exceed the image size!\n"
                 f"Image size: {self.Width} x {self.Height}"
             )
             return
 
-        # (11) Reset saved names list for this run
+        # (11) Sliding window parameters
         self.list_of_saved_names = []
-
-        # (12) Sliding window crop + augment + save
         self.steps_in_height = math.floor((self.Height - self.patchSize_y) / self.patchStep_y) + 1
         self.steps_in_width  = math.floor((self.Width  - self.patchSize_x) / self.patchStep_x) + 1
+        total_tiles = self.steps_in_height * self.steps_in_width
 
-        self.num_of_crop = 0
-        for row in range(self.steps_in_height):
-            for col in range(self.steps_in_width):
-                self.num_of_crop += 1
+        # Snapshot all UI values before entering threads
+        tile_kwargs = dict(
+            image            = self.image,
+            mask_image       = mask_image,
+            mask_enabled     = mask_enabled,
+            foreground_value = self.spin_foreground.value(),
+            patchStep_y      = self.patchStep_y,
+            patchStep_x      = self.patchStep_x,
+            patchSize_y      = self.patchSize_y,
+            patchSize_x      = self.patchSize_x,
+            selected_methods = list(self.selected_augment_methods),
+            aug_suffixes     = self.augment_passifixes,
+            outname          = self.lineEdit_outname.text(),
+            img_ext          = self.imageNamePassifix,
+            mask_ext         = self.maskNamePassifix,
+            total_img_path   = total_img_path,
+            total_mask_path  = total_mask_path,
+            steps_in_width   = self.steps_in_width,
+            georef           = self.radio_georef.isChecked(),
+            src_geotransform = self.src_geotransform,
+            src_projection   = self.src_projection,
+        )
 
-                y1 = row * self.patchStep_y
-                y2 = y1 + self.patchSize_y
-                x1 = col * self.patchStep_x
-                x2 = x1 + self.patchSize_x
+        # (12) Crop + augment + save  (single- or multi-threaded)
+        n_workers = self.spin_workers.value()
 
-                crop_image = self.image[y1:y2, x1:x2] if self.channel == 1 else self.image[y1:y2, x1:x2, :]
-                augment_list = augment(crop_image)
-
-                if mask_enabled:
-                    crop_mask = mask_image[y1:y2, x1:x2] if mask_image.ndim == 2 else mask_image[y1:y2, x1:x2, :]
-                    mask_augment_list = augment(crop_mask)
-
-                for aug_idx in self.selected_augment_methods:
-                    img_name = (
-                        f"{self.num_of_crop}_{self.lineEdit_outname.text()}"
-                        f"_{self.augment_passifixes[aug_idx]}.{self.imageNamePassifix}"
+        if n_workers == 1:
+            for row in range(self.steps_in_height):
+                for col in range(self.steps_in_width):
+                    names = _process_tile(row, col, **tile_kwargs)
+                    self.list_of_saved_names.extend(names)
+                    done = row * self.steps_in_width + col + 1
+                    self.progress_label.setText(
+                        f'Patching: {math.floor(done / total_tiles * 100)}%  '
+                        f'({done}/{total_tiles} tiles)'
                     )
-                    _save_patch(augment_list[aug_idx], os.path.join(total_img_path, img_name), self.imageNamePassifix)
-                    self.list_of_saved_names.append(img_name)
-
-                    if mask_enabled:
-                        mask_name = (
-                            f"{self.num_of_crop}_{self.lineEdit_outname.text()}"
-                            f"_{self.augment_passifixes[aug_idx]}.{self.maskNamePassifix}"
-                        )
-                        _save_patch(mask_augment_list[aug_idx], os.path.join(total_mask_path, mask_name), self.maskNamePassifix)
-
-                percent = math.floor(self.num_of_crop / (self.steps_in_height * self.steps_in_width) * 100)
-                self.progress_label.setText(f'Patching: {percent}% completed')
-                QApplication.processEvents()
+                    QApplication.processEvents()
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+                futures = {
+                    pool.submit(_process_tile, row, col, **tile_kwargs): (row, col)
+                    for row in range(self.steps_in_height)
+                    for col in range(self.steps_in_width)
+                }
+                done_count = 0
+                for future in concurrent.futures.as_completed(futures):
+                    self.list_of_saved_names.extend(future.result())
+                    done_count += 1
+                    self.progress_label.setText(
+                        f'Patching: {math.floor(done_count / total_tiles * 100)}%  '
+                        f'({done_count}/{total_tiles} tiles)'
+                    )
+                    QApplication.processEvents()
 
         self.progress_label.setText('Patching complete! Starting dataset split...')
         QApplication.processEvents()
 
-        # (13) Dataset splitting (only if percentages were provided)
+        # (13) Dataset splitting
         if total_pct == 100:
             self._split_dataset(mask_enabled, total_img_path, total_mask_path)
 
@@ -497,7 +784,6 @@ class PatchifyDialog(QDialog):
         random.shuffle(randomized)
         total_number = len(randomized)
 
-        # Determine counts for each split
         if self.Train_val == 0:
             num_train = 0
             if self.Test_val == 0:
@@ -507,7 +793,6 @@ class PatchifyDialog(QDialog):
             else:
                 num_test  = math.floor((self.Test_val / 100) * total_number)
                 num_valid = total_number - num_test
-
         elif self.Test_val == 0:
             num_test = 0
             if self.Valid_val == 0:
@@ -515,20 +800,17 @@ class PatchifyDialog(QDialog):
             else:
                 num_train = math.floor((self.Train_val / 100) * total_number)
                 num_valid = total_number - num_train
-
         elif self.Valid_val == 0:
             num_valid = 0
             num_train = math.floor((self.Train_val / 100) * total_number)
             num_test  = total_number - num_train
-
         else:
             num_train    = math.floor((self.Train_val / 100) * total_number)
             what_is_left = total_number - num_train
             num_test     = math.floor((self.Test_val / (self.Test_val + self.Valid_val)) * what_is_left)
             num_valid    = what_is_left - num_test
 
-        # Create split directories
-        splits          = [("Train", num_train), ("Test", num_test), ("Validation", num_valid)]
+        splits           = [("Train", num_train), ("Test", num_test), ("Validation", num_valid)]
         split_img_paths  = {}
         split_mask_paths = {}
 
@@ -546,7 +828,6 @@ class PatchifyDialog(QDialog):
                 else:
                     split_img_paths[split_name] = split_root
 
-        # Copy files
         saved_count = 0
         for split_name, count in splits:
             if count == 0:
@@ -561,6 +842,7 @@ class PatchifyDialog(QDialog):
                     mask_name = img_name.rsplit(".", 1)[0] + "." + self.maskNamePassifix
                     shutil.copy2(os.path.join(total_mask_path, mask_name), os.path.join(mask_dest, mask_name))
                 saved_count += 1
-                percent = math.floor(saved_count / total_number * 100)
-                self.progress_label.setText(f'Dataset split: {percent}% completed')
+                self.progress_label.setText(
+                    f'Dataset split: {math.floor(saved_count / total_number * 100)}% completed'
+                )
                 QApplication.processEvents()
