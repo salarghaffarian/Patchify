@@ -12,7 +12,7 @@ _MAX_WORKERS     = max(1, _CPU_COUNT - 1)
 _DEFAULT_WORKERS = max(1, _CPU_COUNT // 2)
 
 import numpy as np
-from osgeo import gdal, gdal_array, ogr
+from osgeo import gdal, gdal_array, ogr, osr
 from PyQt5.QtWidgets import (
     QAction, QApplication, QCheckBox, QDialog, QFileDialog, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
@@ -58,9 +58,27 @@ def _vector_mask_info(layer):
     return f'{geom_s}  |  {count:,} features  |  {f_s}'
 
 
+def _crs_mismatch(raster_layer, vector_layer):
+    """Return a warning string if the two layers have different CRS, else empty string."""
+    if raster_layer is None or vector_layer is None:
+        return ''
+    r_crs = raster_layer.crs()
+    v_crs = vector_layer.crs()
+    if r_crs.isValid() and v_crs.isValid() and r_crs != v_crs:
+        return (
+            f'CRS mismatch — mask ({v_crs.authid()}) differs from image '
+            f'({r_crs.authid()}). Will be reprojected automatically.'
+        )
+    return ''
+
+
 def _rasterize_vector(layer, ref_gt, ref_proj, ref_w, ref_h,
                        burn_field=None, burn_value=1):
-    """Rasterize a QgsVectorLayer to a numpy array matching the reference raster grid."""
+    """Rasterize a QgsVectorLayer to a numpy array matching the reference raster grid.
+
+    If the vector CRS differs from the raster CRS the features are reprojected
+    into an in-memory OGR layer before rasterization — no data is written to disk.
+    """
     source = layer.source()
     if '|layername=' in source:
         path, lname = source.split('|layername=', 1)
@@ -71,6 +89,35 @@ def _rasterize_vector(layer, ref_gt, ref_proj, ref_w, ref_h,
         ogr_layer = vec_ds.GetLayer() if vec_ds else None
     if ogr_layer is None:
         return None
+
+    # Reproject to raster CRS when the two differ
+    target_srs = osr.SpatialReference()
+    target_srs.ImportFromWkt(ref_proj)
+    target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    src_srs = ogr_layer.GetSpatialRef()
+    if src_srs is not None and not src_srs.IsSame(target_srs):
+        src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        transform    = osr.CoordinateTransformation(src_srs, target_srs)
+        mem_ogr_drv  = ogr.GetDriverByName('Memory')
+        mem_ogr_ds   = mem_ogr_drv.CreateDataSource('')
+        mem_layer    = mem_ogr_ds.CreateLayer('', srs=target_srs,
+                                               geom_type=ogr_layer.GetGeomType())
+        layer_defn   = ogr_layer.GetLayerDefn()
+        for i in range(layer_defn.GetFieldCount()):
+            mem_layer.CreateField(layer_defn.GetFieldDefn(i))
+        out_defn = mem_layer.GetLayerDefn()
+        for feat in ogr_layer:
+            geom = feat.GetGeometryRef()
+            if geom is None:
+                continue
+            geom = geom.Clone()
+            geom.Transform(transform)
+            new_feat = ogr.Feature(out_defn)
+            new_feat.SetGeometry(geom)
+            for i in range(out_defn.GetFieldCount()):
+                new_feat.SetField(i, feat.GetField(i))
+            mem_layer.CreateFeature(new_feat)
+        ogr_layer = mem_layer
 
     mem_drv = gdal.GetDriverByName('MEM')
     out_ds  = mem_drv.Create('', ref_w, ref_h, 1, gdal.GDT_Byte)
@@ -484,6 +531,9 @@ class PatchifyDialog(QDialog):
             self.image_filename    = None
             self.imageNamePassifix = None
             self.lbl_image_info.setText('')
+        # Refresh mask CRS warning — raster CRS may have changed
+        if self.check_mask_enabled.isChecked():
+            self.onMaskLayerChanged(self.combo_mask.currentLayer())
 
     def onMaskLayerChanged(self, layer):
         self.combo_mask_field.clear()
@@ -494,10 +544,18 @@ class PatchifyDialog(QDialog):
             for field in layer.fields():
                 if field.isNumeric():
                     self.combo_mask_field.addItem(field.name(), field.name())
-            self.lbl_mask_info.setText(_vector_mask_info(layer))
-            self.lbl_mask_info.setStyleSheet(
-                'font: 8pt "Microsoft JhengHei UI"; color: #2c6fad; font-style: italic;'
-            )
+            info = _vector_mask_info(layer)
+            warn = _crs_mismatch(self.combo_input.currentLayer(), layer)
+            if warn:
+                self.lbl_mask_info.setText(f'{info}\n⚠ {warn}')
+                self.lbl_mask_info.setStyleSheet(
+                    'font: 8pt "Microsoft JhengHei UI"; color: #b97000; font-style: italic;'
+                )
+            else:
+                self.lbl_mask_info.setText(info)
+                self.lbl_mask_info.setStyleSheet(
+                    'font: 8pt "Microsoft JhengHei UI"; color: #2c6fad; font-style: italic;'
+                )
         else:
             self.mask_layer       = None
             self.maskNamePassifix = None
