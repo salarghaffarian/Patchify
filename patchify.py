@@ -399,7 +399,19 @@ class PatchifyDialog(QDialog):
         save_mode_row.addStretch()
         crop_layout.addWidget(QLabel('Save As:'), 2, 0)
         crop_layout.addLayout(save_mode_row,      2, 1, 1, 4)
-        crop_layout.setRowStretch(3, 1)
+
+        sep_crop = QFrame()
+        sep_crop.setFrameShape(QFrame.HLine)
+        sep_crop.setFrameShadow(QFrame.Sunken)
+        crop_layout.addWidget(sep_crop, 3, 0, 1, 5)
+
+        self.lbl_tile_count = QLabel('')
+        self.lbl_tile_count.setStyleSheet(
+            'font: 8pt "Microsoft JhengHei UI"; color: #2a7a2a; font-weight: bold;'
+        )
+        self.lbl_tile_count.setWordWrap(True)
+        crop_layout.addWidget(self.lbl_tile_count, 4, 0, 1, 5)
+        crop_layout.setRowStretch(5, 1)
         mid_row.addWidget(gb_crop)
 
         gb_output = QGroupBox('Dataset Split')
@@ -515,6 +527,13 @@ class PatchifyDialog(QDialog):
         for field in (self.lineEdit_train, self.lineEdit_test, self.lineEdit_valid):
             field.textChanged.connect(self.updateSplitSum)
         self.updateSplitSum()
+        for field in (self.lineEdit_winx, self.lineEdit_winy,
+                      self.lineEdit_stridex, self.lineEdit_stridey):
+            field.textChanged.connect(self.updateTileCount)
+        for cb in (self.check_original, self.check_rotate90, self.check_rotate180,
+                   self.check_rotate270, self.check_flipv, self.check_fliph,
+                   self.check_flipvh):
+            cb.stateChanged.connect(self.updateTileCount)
         # Seed info labels from whatever layer is already selected on open
         self.onImageLayerChanged(self.combo_input.currentLayer())
 
@@ -541,12 +560,14 @@ class PatchifyDialog(QDialog):
                    self.check_rotate270, self.check_flipv, self.check_fliph, self.check_flipvh]:
             cb.setChecked(True)
             cb.setEnabled(False)
+        self.updateTileCount()
 
     def customChecked(self):
         for cb in [self.check_original, self.check_rotate90, self.check_rotate180,
                    self.check_rotate270, self.check_flipv, self.check_fliph, self.check_flipvh]:
             cb.setChecked(False)
             cb.setEnabled(True)
+        self.updateTileCount()
 
     def onImageLayerChanged(self, layer):
         if layer:
@@ -557,6 +578,7 @@ class PatchifyDialog(QDialog):
             self.image_filename    = None
             self.imageNamePassifix = None
             self.lbl_image_info.setText('')
+        self.updateTileCount()
         # Refresh mask CRS warning — raster CRS may have changed
         if self.check_mask_enabled.isChecked():
             self.onMaskLayerChanged(self.combo_mask.currentLayer())
@@ -610,6 +632,42 @@ class PatchifyDialog(QDialog):
         else:
             self.lbl_split_sum.setText(f'Sum: {total}%  \u2014  must equal 100%')
             self.lbl_split_sum.setStyleSheet('font: 8pt "Microsoft JhengHei UI"; color: #b94040; font-weight: bold;')
+
+    def updateTileCount(self):
+        layer = self.combo_input.currentLayer()
+        if layer is None:
+            self.lbl_tile_count.setText('')
+            return
+        try:
+            pw = int(self.lineEdit_winx.text())
+            ph = int(self.lineEdit_winy.text())
+            sx = int(self.lineEdit_stridex.text())
+            sy = int(self.lineEdit_stridey.text())
+        except ValueError:
+            self.lbl_tile_count.setText('')
+            return
+        w = layer.width()
+        h = layer.height()
+        if pw < 1 or ph < 1 or sx < 1 or sy < 1 or pw > w or ph > h:
+            self.lbl_tile_count.setText('')
+            return
+        cols    = math.floor((w - pw) / sx) + 1
+        rows    = math.floor((h - ph) / sy) + 1
+        n_tiles = cols * rows
+        checks  = [self.check_original, self.check_rotate90, self.check_rotate180,
+                   self.check_rotate270, self.check_flipv, self.check_fliph, self.check_flipvh]
+        n_aug   = sum(1 for cb in checks if cb.isChecked())
+        if n_aug > 1:
+            self.lbl_tile_count.setText(
+                f'{cols} \u00d7 {rows} grid  \u2192  {n_tiles:,} tiles'
+                f'  \u00d7  {n_aug} aug  =  {n_tiles * n_aug:,} samples'
+            )
+        elif n_aug == 1:
+            self.lbl_tile_count.setText(
+                f'{cols} \u00d7 {rows} grid  \u2192  {n_tiles:,} tiles'
+            )
+        else:
+            self.lbl_tile_count.setText('')
 
     def toggleMaskInput(self, checked):
         self.combo_mask.setEnabled(checked)
