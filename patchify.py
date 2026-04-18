@@ -3,6 +3,7 @@ import math
 import os
 import random
 import shutil
+import time
 
 # Reserve one logical core for the QGIS UI thread and OS scheduler.
 # The default starts at half the available cores — conservative enough not to
@@ -18,7 +19,7 @@ from PyQt5.QtWidgets import (
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QProgressBar, QPushButton, QRadioButton, QSpinBox, QToolButton, QVBoxLayout
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QSettings
 from PyQt5.QtGui import QIcon
 from qgis.gui import QgsMapLayerComboBox
 from qgis.core import QgsMapLayerProxyModel, QgsWkbTypes
@@ -26,6 +27,17 @@ from .augment import augment
 
 
 _EXT_TO_DRIVER = {'tif': 'GTiff', 'tiff': 'GTiff', 'png': 'PNG', 'jpg': 'JPEG', 'jpeg': 'JPEG'}
+
+
+def _fmt_seconds(secs):
+    secs = int(secs)
+    if secs < 60:
+        return f'{secs}s'
+    m, s = divmod(secs, 60)
+    if m < 60:
+        return f'{m}m {s:02d}s'
+    h, m = divmod(m, 60)
+    return f'{h}h {m:02d}m'
 
 
 def _image_info(filepath):
@@ -587,6 +599,8 @@ class PatchifyDialog(QDialog):
         self._patching            = False
         self._cancel_requested    = False
 
+        self._loadSettings()
+
     # -------------------------------------------------------------------------
     # Slot Functions
     # -------------------------------------------------------------------------
@@ -610,6 +624,8 @@ class PatchifyDialog(QDialog):
             self.image_filename    = layer.source()
             self.imageNamePassifix = self.image_filename.rsplit('.', 1)[-1]
             self.lbl_image_info.setText(_image_info(self.image_filename))
+            if not self.lineEdit_outname.text():
+                self.lineEdit_outname.setText(layer.name())
         else:
             self.image_filename    = None
             self.imageNamePassifix = None
@@ -648,6 +664,37 @@ class PatchifyDialog(QDialog):
             self.lbl_mask_info.setStyleSheet(
                 'font: 8pt "Microsoft JhengHei UI"; color: #666; font-style: italic;'
             )
+
+    def _loadSettings(self):
+        s = QSettings('Patchify', 'Patchify')
+        self.lineEdit_winx.setText(s.value('tile_x', ''))
+        self.lineEdit_winy.setText(s.value('tile_y', ''))
+        self.lineEdit_stridex.setText(s.value('stride_x', ''))
+        self.lineEdit_stridey.setText(s.value('stride_y', ''))
+        self.lineEdit_train.setText(s.value('split_train', '70'))
+        self.lineEdit_test.setText(s.value('split_test', '20'))
+        self.lineEdit_valid.setText(s.value('split_valid', '10'))
+        self.spin_workers.setValue(int(s.value('workers', _DEFAULT_WORKERS)))
+        fmt_index = int(s.value('format_index', 0))
+        if fmt_index < self.combo_format.count():
+            self.combo_format.setCurrentIndex(fmt_index)
+        if s.value('array_mode', 'false') == 'true':
+            self.radio_array.setChecked(True)
+        else:
+            self.radio_georef.setChecked(True)
+
+    def _saveSettings(self):
+        s = QSettings('Patchify', 'Patchify')
+        s.setValue('tile_x',      self.lineEdit_winx.text())
+        s.setValue('tile_y',      self.lineEdit_winy.text())
+        s.setValue('stride_x',    self.lineEdit_stridex.text())
+        s.setValue('stride_y',    self.lineEdit_stridey.text())
+        s.setValue('split_train', self.lineEdit_train.text())
+        s.setValue('split_test',  self.lineEdit_test.text())
+        s.setValue('split_valid', self.lineEdit_valid.text())
+        s.setValue('workers',     self.spin_workers.value())
+        s.setValue('format_index', self.combo_format.currentIndex())
+        s.setValue('array_mode',  'true' if self.radio_array.isChecked() else 'false')
 
     def onCancelClicked(self):
         if self._patching:
@@ -990,9 +1037,12 @@ class PatchifyDialog(QDialog):
             src_projection   = self.src_projection,
         )
 
+        self._saveSettings()
+
         # (12) Crop + augment + save  (single- or multi-threaded)
         n_workers   = self.spin_workers.value()
         tile_errors = []   # (row, col, error_message)
+        t_start     = time.monotonic()
 
         if n_workers == 1:
             for row in range(self.steps_in_height):
@@ -1004,11 +1054,14 @@ class PatchifyDialog(QDialog):
                         self.list_of_saved_names.extend(names)
                     except Exception as exc:
                         tile_errors.append((row, col, str(exc)))
-                    done = row * self.steps_in_width + col + 1
-                    pct  = math.floor(done / total_tiles * 100)
+                    done    = row * self.steps_in_width + col + 1
+                    pct     = math.floor(done / total_tiles * 100)
+                    elapsed = time.monotonic() - t_start
+                    eta     = (elapsed / done) * (total_tiles - done) if done else 0
                     self.progress_bar.setValue(pct)
                     self.progress_label.setText(
                         f'Patching: {pct}%  ({done}/{total_tiles} tiles)'
+                        f'  |  elapsed {_fmt_seconds(elapsed)}  ETA {_fmt_seconds(eta)}'
                     )
                     QApplication.processEvents()
                 if self._cancel_requested:
@@ -1032,10 +1085,13 @@ class PatchifyDialog(QDialog):
                     except Exception as exc:
                         tile_errors.append((row, col, str(exc)))
                     done_count += 1
-                    pct = math.floor(done_count / total_tiles * 100)
+                    pct     = math.floor(done_count / total_tiles * 100)
+                    elapsed = time.monotonic() - t_start
+                    eta     = (elapsed / done_count) * (total_tiles - done_count) if done_count else 0
                     self.progress_bar.setValue(pct)
                     self.progress_label.setText(
                         f'Patching: {pct}%  ({done_count}/{total_tiles} tiles)'
+                        f'  |  elapsed {_fmt_seconds(elapsed)}  ETA {_fmt_seconds(eta)}'
                     )
                     QApplication.processEvents()
 
