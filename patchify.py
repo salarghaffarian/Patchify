@@ -801,6 +801,13 @@ class PatchifyDialog(QDialog):
 
         try:
             self._run_patchifying()
+        except Exception as exc:
+            self.progress_bar.setValue(0)
+            self.progress_label.setText('Error — see details.')
+            QMessageBox.critical(
+                self, 'Patching failed',
+                f'An unexpected error stopped the run:\n\n{exc}'
+            )
         finally:
             self._patching = False
             self._set_patching_ui(False)
@@ -984,15 +991,19 @@ class PatchifyDialog(QDialog):
         )
 
         # (12) Crop + augment + save  (single- or multi-threaded)
-        n_workers = self.spin_workers.value()
+        n_workers   = self.spin_workers.value()
+        tile_errors = []   # (row, col, error_message)
 
         if n_workers == 1:
             for row in range(self.steps_in_height):
                 for col in range(self.steps_in_width):
                     if self._cancel_requested:
                         break
-                    names = _process_tile(row, col, **tile_kwargs)
-                    self.list_of_saved_names.extend(names)
+                    try:
+                        names = _process_tile(row, col, **tile_kwargs)
+                        self.list_of_saved_names.extend(names)
+                    except Exception as exc:
+                        tile_errors.append((row, col, str(exc)))
                     done = row * self.steps_in_width + col + 1
                     pct  = math.floor(done / total_tiles * 100)
                     self.progress_bar.setValue(pct)
@@ -1015,7 +1026,11 @@ class PatchifyDialog(QDialog):
                         for f in futures:
                             f.cancel()
                         break
-                    self.list_of_saved_names.extend(future.result())
+                    row, col = futures[future]
+                    try:
+                        self.list_of_saved_names.extend(future.result())
+                    except Exception as exc:
+                        tile_errors.append((row, col, str(exc)))
                     done_count += 1
                     pct = math.floor(done_count / total_tiles * 100)
                     self.progress_bar.setValue(pct)
@@ -1023,6 +1038,18 @@ class PatchifyDialog(QDialog):
                         f'Patching: {pct}%  ({done_count}/{total_tiles} tiles)'
                     )
                     QApplication.processEvents()
+
+        if tile_errors:
+            lines = '\n'.join(
+                f'  tile {r * self.steps_in_width + c + 1} (row {r}, col {c}): {msg}'
+                for r, c, msg in tile_errors[:10]
+            )
+            if len(tile_errors) > 10:
+                lines += f'\n  … and {len(tile_errors) - 10} more'
+            QMessageBox.warning(
+                self, f'{len(tile_errors)} tile(s) failed',
+                f'{len(tile_errors)} tile(s) could not be processed and were skipped:\n\n{lines}'
+            )
 
         if self._cancel_requested:
             self.progress_bar.setValue(0)
