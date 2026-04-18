@@ -14,10 +14,11 @@ _DEFAULT_WORKERS = max(1, _CPU_COUNT // 2)
 import numpy as np
 from osgeo import gdal, gdal_array, ogr, osr
 from PyQt5.QtWidgets import (
-    QAction, QApplication, QCheckBox, QDialog, QFileDialog, QFrame,
+    QAction, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QProgressBar, QPushButton, QRadioButton, QSpinBox, QToolButton, QVBoxLayout
 )
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
 from qgis.gui import QgsMapLayerComboBox
 from qgis.core import QgsMapLayerProxyModel, QgsWkbTypes
@@ -331,7 +332,6 @@ class PatchifyDialog(QDialog):
         self.combo_mask.setFilters(QgsMapLayerProxyModel.VectorLayer)
         self.combo_mask.setEnabled(False)
         # Burn-field selector — populated from the vector layer's numeric fields
-        from PyQt5.QtWidgets import QComboBox
         self.lbl_burn_field = QLabel('Attribute Field:')
         self.lbl_burn_field.setStyleSheet('font: 9pt "Microsoft JhengHei UI"; color: #444;')
         self.lbl_burn_field.setEnabled(False)
@@ -408,18 +408,25 @@ class PatchifyDialog(QDialog):
         crop_layout.addWidget(QLabel('Save As:'), 2, 0)
         crop_layout.addLayout(save_mode_row,      2, 1, 1, 4)
 
+        self.combo_format = QComboBox()
+        self.combo_format.addItem('GeoTIFF (.tif)', 'tif')
+        self.combo_format.addItem('PNG (.png)',      'png')
+        self.combo_format.addItem('JPEG (.jpg)',     'jpg')
+        crop_layout.addWidget(QLabel('Format:'), 3, 0)
+        crop_layout.addWidget(self.combo_format, 3, 1, 1, 4)
+
         sep_crop = QFrame()
         sep_crop.setFrameShape(QFrame.HLine)
         sep_crop.setFrameShadow(QFrame.Sunken)
-        crop_layout.addWidget(sep_crop, 3, 0, 1, 5)
+        crop_layout.addWidget(sep_crop, 4, 0, 1, 5)
 
         self.lbl_tile_count = QLabel('')
         self.lbl_tile_count.setStyleSheet(
             'font: 8pt "Microsoft JhengHei UI"; color: #2a7a2a; font-weight: bold;'
         )
         self.lbl_tile_count.setWordWrap(True)
-        crop_layout.addWidget(self.lbl_tile_count, 4, 0, 1, 5)
-        crop_layout.setRowStretch(5, 1)
+        crop_layout.addWidget(self.lbl_tile_count, 5, 0, 1, 5)
+        crop_layout.setRowStretch(6, 1)
         mid_row.addWidget(gb_crop)
 
         gb_output = QGroupBox('Dataset Split')
@@ -535,6 +542,8 @@ class PatchifyDialog(QDialog):
         # --- Signals & Slots ---
         self.radio_all.toggled.connect(self.allChecked)
         self.radio_custom.toggled.connect(self.customChecked)
+        self.radio_georef.toggled.connect(self.updateFormatOptions)
+        self.radio_array.toggled.connect(self.updateFormatOptions)
         self.btn_cancel.clicked.connect(self.onCancelClicked)
         self.combo_input.layerChanged.connect(self.onImageLayerChanged)
         self.btn_export.clicked.connect(self.pickSavingFolder)
@@ -559,6 +568,8 @@ class PatchifyDialog(QDialog):
             cb.stateChanged.connect(self.updateTileCount)
         # Seed info labels from whatever layer is already selected on open
         self.onImageLayerChanged(self.combo_input.currentLayer())
+
+        self.updateFormatOptions()
 
         # Default augmentation state
         self.radio_all.setChecked(True)
@@ -604,6 +615,7 @@ class PatchifyDialog(QDialog):
             self.imageNamePassifix = None
             self.lbl_image_info.setText('')
         self.updateTileCount()
+        self.updateFormatOptions()
         # Refresh mask CRS warning — raster CRS may have changed
         if self.check_mask_enabled.isChecked():
             self.onMaskLayerChanged(self.combo_mask.currentLayer())
@@ -701,6 +713,23 @@ class PatchifyDialog(QDialog):
             )
         else:
             self.lbl_tile_count.setText('')
+
+    def updateFormatOptions(self):
+        """Enable PNG/JPEG only in Array Only mode with ≤ 3 bands; GeoTIFF always available."""
+        layer       = self.combo_input.currentLayer()
+        array_mode  = self.radio_array.isChecked()
+        n_bands     = layer.bandCount() if layer else 999
+        raster_ok   = array_mode and n_bands <= 3
+
+        model = self.combo_format.model()
+        for i, enabled in enumerate([True, raster_ok, raster_ok]):
+            item = model.item(i)
+            flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
+            item.setFlags(flags if enabled else Qt.NoItemFlags)
+
+        # If selected format just became unavailable, fall back to GeoTIFF
+        if not raster_ok and self.combo_format.currentIndex() > 0:
+            self.combo_format.setCurrentIndex(0)
 
     def toggleMaskInput(self, checked):
         self.combo_mask.setEnabled(checked)
@@ -944,7 +973,7 @@ class PatchifyDialog(QDialog):
             selected_methods = list(self.selected_augment_methods),
             aug_suffixes     = self.augment_passifixes,
             outname          = self.lineEdit_outname.text(),
-            img_ext          = self.imageNamePassifix,
+            img_ext          = self.combo_format.currentData(),
             mask_ext         = self.maskNamePassifix,
             total_img_path   = total_img_path,
             total_mask_path  = total_mask_path,
