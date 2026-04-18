@@ -206,11 +206,12 @@ def _tile_geotransform(src_gt, x1, y1):
 
 def _process_tile(row, col, *, img_path, n_bands, nodata_value,
                   mask_source, mask_layer_name, mask_enabled, foreground_value,
-                  burn_field, burn_value,
+                  min_fg_coverage, burn_field, burn_value,
                   patchStep_y, patchStep_x, patchSize_y, patchSize_x,
                   selected_methods, aug_suffixes, outname, img_ext, mask_ext,
                   total_img_path, total_mask_path, steps_in_width,
                   georef, src_geotransform, src_projection):
+    """Return (saved_names, skip_reason) where skip_reason is None, 'nodata', or 'noforeground'."""
     y1 = row * patchStep_y
     x1 = col * patchStep_x
     tile_num = row * steps_in_width + col + 1
@@ -227,7 +228,7 @@ def _process_tile(row, col, *, img_path, n_bands, nodata_value,
         all_nodata = (np.all(np.isnan(crop)) if math.isnan(nodata_value)
                       else np.all(crop == nodata_value))
         if all_nodata:
-            return []
+            return [], 'nodata'
 
     tile_gt  = _tile_geotransform(src_geotransform, x1, y1)
     aug_imgs = augment(crop)
@@ -238,8 +239,12 @@ def _process_tile(row, col, *, img_path, n_bands, nodata_value,
             mask_source, mask_layer_name, tile_gt, src_projection,
             patchSize_x, patchSize_y, burn_field, burn_value,
         )
-        if crop_mask is None or not np.any(crop_mask == foreground_value):
-            return []
+        if crop_mask is None:
+            return [], 'noforeground'
+        fg_pixels = np.sum(crop_mask == foreground_value)
+        coverage  = fg_pixels / crop_mask.size * 100
+        if coverage < (min_fg_coverage if min_fg_coverage > 0 else 1e-9):
+            return [], 'noforeground'
         aug_masks = augment(crop_mask)
 
     geo_kw = {}
@@ -255,7 +260,7 @@ def _process_tile(row, col, *, img_path, n_bands, nodata_value,
             msk_name = f"{tile_num}_{outname}_{aug_suffixes[idx]}.{mask_ext}"
             _save_patch(aug_masks[idx], os.path.join(total_mask_path, msk_name), mask_ext)
 
-    return saved
+    return saved, None
 
 
 # -----------------------------------------------------------------------------
@@ -357,7 +362,7 @@ class PatchifyDialog(QDialog):
         self.lbl_mask_info.setStyleSheet('font: 8pt "Microsoft JhengHei UI"; color: #666; font-style: italic;')
 
         # Foreground value — used to skip tiles with no foreground pixels (binary masks)
-        self.lbl_foreground = QLabel('Binary Foreground Value (1–255):')
+        self.lbl_foreground = QLabel('Foreground Value (1–255):')
         self.lbl_foreground.setStyleSheet('font: 9pt "Microsoft JhengHei UI"; color: #444;')
         self.lbl_foreground.setEnabled(False)
         self.spin_foreground = QSpinBox()
@@ -366,19 +371,35 @@ class PatchifyDialog(QDialog):
         self.spin_foreground.setMaximumWidth(60)
         self.spin_foreground.setEnabled(False)
 
-        io_layout.addWidget(label_input,             0, 0)
-        io_layout.addWidget(self.combo_input,        0, 1, 1, 2)
-        io_layout.addWidget(self.lbl_image_info,     1, 0, 1, 3)
-        io_layout.addWidget(label_export,            2, 0)
-        io_layout.addWidget(self.lineEdit_export,    2, 1)
-        io_layout.addWidget(self.btn_export,         2, 2)
-        io_layout.addWidget(self.check_mask_enabled, 3, 0)
-        io_layout.addWidget(self.combo_mask,         3, 1, 1, 2)
-        io_layout.addWidget(self.lbl_burn_field,     4, 0)
-        io_layout.addWidget(self.combo_mask_field,   4, 1, 1, 2)
-        io_layout.addWidget(self.lbl_mask_info,      5, 0, 1, 3)
-        io_layout.addWidget(self.lbl_foreground,     6, 0)
-        io_layout.addWidget(self.spin_foreground,    6, 1)
+        # Min foreground coverage — skip tiles where foreground covers less than this %
+        self.lbl_fg_coverage = QLabel('Min Foreground Coverage (%):')
+        self.lbl_fg_coverage.setStyleSheet('font: 9pt "Microsoft JhengHei UI"; color: #444;')
+        self.lbl_fg_coverage.setEnabled(False)
+        self.spin_fg_coverage = QSpinBox()
+        self.spin_fg_coverage.setRange(0, 100)
+        self.spin_fg_coverage.setValue(0)
+        self.spin_fg_coverage.setMaximumWidth(60)
+        self.spin_fg_coverage.setEnabled(False)
+        self.spin_fg_coverage.setToolTip(
+            'Skip tiles where foreground pixels cover less than this percentage of the tile.\n'
+            '0 = keep any tile with at least one foreground pixel (default).'
+        )
+
+        io_layout.addWidget(label_input,              0, 0)
+        io_layout.addWidget(self.combo_input,         0, 1, 1, 2)
+        io_layout.addWidget(self.lbl_image_info,      1, 0, 1, 3)
+        io_layout.addWidget(label_export,             2, 0)
+        io_layout.addWidget(self.lineEdit_export,     2, 1)
+        io_layout.addWidget(self.btn_export,          2, 2)
+        io_layout.addWidget(self.check_mask_enabled,  3, 0)
+        io_layout.addWidget(self.combo_mask,          3, 1, 1, 2)
+        io_layout.addWidget(self.lbl_burn_field,      4, 0)
+        io_layout.addWidget(self.combo_mask_field,    4, 1, 1, 2)
+        io_layout.addWidget(self.lbl_mask_info,       5, 0, 1, 3)
+        io_layout.addWidget(self.lbl_foreground,      6, 0)
+        io_layout.addWidget(self.spin_foreground,     6, 1)
+        io_layout.addWidget(self.lbl_fg_coverage,     7, 0)
+        io_layout.addWidget(self.spin_fg_coverage,    7, 1)
         root.addWidget(gb_io)
 
         # --- Middle row: Patch Configuration + Dataset Split ---
@@ -404,11 +425,23 @@ class PatchifyDialog(QDialog):
         crop_layout.addWidget(self.lineEdit_winx,         0, 2)
         crop_layout.addWidget(QLabel('Y'),                0, 3)
         crop_layout.addWidget(self.lineEdit_winy,         0, 4)
-        crop_layout.addWidget(QLabel('Stride:'),          1, 0)
-        crop_layout.addWidget(QLabel('X'),                1, 1)
+        self.lbl_stride      = QLabel('Stride:')
+        self.lbl_stride_x    = QLabel('X')
+        self.lbl_stride_y    = QLabel('Y')
+        crop_layout.addWidget(self.lbl_stride,            1, 0)
+        crop_layout.addWidget(self.lbl_stride_x,          1, 1)
         crop_layout.addWidget(self.lineEdit_stridex,      1, 2)
-        crop_layout.addWidget(QLabel('Y'),                1, 3)
+        crop_layout.addWidget(self.lbl_stride_y,          1, 3)
         crop_layout.addWidget(self.lineEdit_stridey,      1, 4)
+
+        self.radio_stride_px  = QRadioButton('px')
+        self.radio_stride_pct = QRadioButton('overlap %')
+        self.radio_stride_px.setChecked(True)
+        stride_mode_row = QHBoxLayout()
+        stride_mode_row.addStretch()
+        stride_mode_row.addWidget(self.radio_stride_px)
+        stride_mode_row.addWidget(self.radio_stride_pct)
+        crop_layout.addLayout(stride_mode_row, 2, 0, 1, 5)
 
         self.radio_georef = QRadioButton('Georeferenced')
         self.radio_array  = QRadioButton('Array Only')
@@ -417,28 +450,28 @@ class PatchifyDialog(QDialog):
         save_mode_row.addWidget(self.radio_georef)
         save_mode_row.addWidget(self.radio_array)
         save_mode_row.addStretch()
-        crop_layout.addWidget(QLabel('Save As:'), 2, 0)
-        crop_layout.addLayout(save_mode_row,      2, 1, 1, 4)
+        crop_layout.addWidget(QLabel('Save As:'), 3, 0)
+        crop_layout.addLayout(save_mode_row,      3, 1, 1, 4)
 
         self.combo_format = QComboBox()
         self.combo_format.addItem('GeoTIFF (.tif)', 'tif')
         self.combo_format.addItem('PNG (.png)',      'png')
         self.combo_format.addItem('JPEG (.jpg)',     'jpg')
-        crop_layout.addWidget(QLabel('Format:'), 3, 0)
-        crop_layout.addWidget(self.combo_format, 3, 1, 1, 4)
+        crop_layout.addWidget(QLabel('Format:'), 4, 0)
+        crop_layout.addWidget(self.combo_format, 4, 1, 1, 4)
 
         sep_crop = QFrame()
         sep_crop.setFrameShape(QFrame.HLine)
         sep_crop.setFrameShadow(QFrame.Sunken)
-        crop_layout.addWidget(sep_crop, 4, 0, 1, 5)
+        crop_layout.addWidget(sep_crop, 5, 0, 1, 5)
 
         self.lbl_tile_count = QLabel('')
         self.lbl_tile_count.setStyleSheet(
             'font: 8pt "Microsoft JhengHei UI"; color: #2a7a2a; font-weight: bold;'
         )
         self.lbl_tile_count.setWordWrap(True)
-        crop_layout.addWidget(self.lbl_tile_count, 5, 0, 1, 5)
-        crop_layout.setRowStretch(6, 1)
+        crop_layout.addWidget(self.lbl_tile_count, 6, 0, 1, 5)
+        crop_layout.setRowStretch(7, 1)
         mid_row.addWidget(gb_crop)
 
         gb_output = QGroupBox('Dataset Split')
@@ -556,6 +589,8 @@ class PatchifyDialog(QDialog):
         self.radio_custom.toggled.connect(self.customChecked)
         self.radio_georef.toggled.connect(self.updateFormatOptions)
         self.radio_array.toggled.connect(self.updateFormatOptions)
+        self.radio_stride_px.toggled.connect(self.updateStrideMode)
+        self.radio_stride_pct.toggled.connect(self.updateStrideMode)
         self.btn_cancel.clicked.connect(self.onCancelClicked)
         self.combo_input.layerChanged.connect(self.onImageLayerChanged)
         self.btn_export.clicked.connect(self.pickSavingFolder)
@@ -682,6 +717,9 @@ class PatchifyDialog(QDialog):
             self.radio_array.setChecked(True)
         else:
             self.radio_georef.setChecked(True)
+        if s.value('stride_pct', 'false') == 'true':
+            self.radio_stride_pct.setChecked(True)
+        self.spin_fg_coverage.setValue(int(s.value('fg_coverage', 0)))
 
     def _saveSettings(self):
         s = QSettings('Patchify', 'Patchify')
@@ -694,7 +732,9 @@ class PatchifyDialog(QDialog):
         s.setValue('split_valid', self.lineEdit_valid.text())
         s.setValue('workers',     self.spin_workers.value())
         s.setValue('format_index', self.combo_format.currentIndex())
-        s.setValue('array_mode',  'true' if self.radio_array.isChecked() else 'false')
+        s.setValue('array_mode',   'true' if self.radio_array.isChecked() else 'false')
+        s.setValue('stride_pct',   'true' if self.radio_stride_pct.isChecked() else 'false')
+        s.setValue('fg_coverage',  self.spin_fg_coverage.value())
 
     def onCancelClicked(self):
         if self._patching:
@@ -733,11 +773,19 @@ class PatchifyDialog(QDialog):
         try:
             pw = int(self.lineEdit_winx.text())
             ph = int(self.lineEdit_winy.text())
-            sx = int(self.lineEdit_stridex.text())
-            sy = int(self.lineEdit_stridey.text())
+            sv = int(self.lineEdit_stridex.text())
+            sv2= int(self.lineEdit_stridey.text())
         except ValueError:
             self.lbl_tile_count.setText('')
             return
+        if self.radio_stride_pct.isChecked():
+            if sv >= 100 or sv2 >= 100:
+                self.lbl_tile_count.setText('')
+                return
+            sx = max(1, round(pw * (1 - sv  / 100)))
+            sy = max(1, round(ph * (1 - sv2 / 100)))
+        else:
+            sx, sy = sv, sv2
         w = layer.width()
         h = layer.height()
         if pw < 1 or ph < 1 or sx < 1 or sy < 1 or pw > w or ph > h:
@@ -760,6 +808,16 @@ class PatchifyDialog(QDialog):
             )
         else:
             self.lbl_tile_count.setText('')
+
+    def updateStrideMode(self):
+        pct_mode = self.radio_stride_pct.isChecked()
+        label    = 'Overlap %:' if pct_mode else 'Stride:'
+        tooltip  = ('Overlap between adjacent tiles (0–99%).\n'
+                    'stride = tile_size × (1 − overlap/100)') if pct_mode else ''
+        self.lbl_stride.setText(label)
+        self.lineEdit_stridex.setToolTip(tooltip)
+        self.lineEdit_stridey.setToolTip(tooltip)
+        self.updateTileCount()
 
     def updateFormatOptions(self):
         """Enable PNG/JPEG only in Array Only mode with ≤ 3 bands; GeoTIFF always available."""
@@ -784,6 +842,8 @@ class PatchifyDialog(QDialog):
         self.combo_mask_field.setEnabled(checked)
         self.lbl_foreground.setEnabled(checked)
         self.spin_foreground.setEnabled(checked)
+        self.lbl_fg_coverage.setEnabled(checked)
+        self.spin_fg_coverage.setEnabled(checked)
         if checked:
             self.onMaskLayerChanged(self.combo_mask.currentLayer())
         else:
@@ -907,8 +967,14 @@ class PatchifyDialog(QDialog):
         # (5) Patch size and stride
         self.patchSize_x = int(self.lineEdit_winx.text())
         self.patchSize_y = int(self.lineEdit_winy.text())
-        self.patchStep_x = int(self.lineEdit_stridex.text())
-        self.patchStep_y = int(self.lineEdit_stridey.text())
+        raw_sx = int(self.lineEdit_stridex.text())
+        raw_sy = int(self.lineEdit_stridey.text())
+        if self.radio_stride_pct.isChecked():
+            self.patchStep_x = max(1, round(self.patchSize_x * (1 - raw_sx  / 100)))
+            self.patchStep_y = max(1, round(self.patchSize_y * (1 - raw_sy / 100)))
+        else:
+            self.patchStep_x = raw_sx
+            self.patchStep_y = raw_sy
 
         # (6) Collect selected augmentation methods
         self.selected_augment_methods = set()
@@ -1017,9 +1083,10 @@ class PatchifyDialog(QDialog):
             mask_source      = mask_source,
             mask_layer_name  = mask_layer_name,
             mask_enabled     = mask_enabled,
-            foreground_value = self.spin_foreground.value(),
-            burn_field       = self.combo_mask_field.currentData(),
-            burn_value       = self.spin_foreground.value(),
+            foreground_value  = self.spin_foreground.value(),
+            min_fg_coverage   = self.spin_fg_coverage.value(),
+            burn_field        = self.combo_mask_field.currentData(),
+            burn_value        = self.spin_foreground.value(),
             patchStep_y      = self.patchStep_y,
             patchStep_x      = self.patchStep_x,
             patchSize_y      = self.patchSize_y,
@@ -1040,9 +1107,11 @@ class PatchifyDialog(QDialog):
         self._saveSettings()
 
         # (12) Crop + augment + save  (single- or multi-threaded)
-        n_workers   = self.spin_workers.value()
-        tile_errors = []   # (row, col, error_message)
-        t_start     = time.monotonic()
+        n_workers        = self.spin_workers.value()
+        tile_errors      = []   # (row, col, error_message)
+        n_skip_nodata    = 0
+        n_skip_nofg      = 0
+        t_start          = time.monotonic()
 
         if n_workers == 1:
             for row in range(self.steps_in_height):
@@ -1050,8 +1119,10 @@ class PatchifyDialog(QDialog):
                     if self._cancel_requested:
                         break
                     try:
-                        names = _process_tile(row, col, **tile_kwargs)
+                        names, skip = _process_tile(row, col, **tile_kwargs)
                         self.list_of_saved_names.extend(names)
+                        if skip == 'nodata':       n_skip_nodata += 1
+                        elif skip == 'noforeground': n_skip_nofg += 1
                     except Exception as exc:
                         tile_errors.append((row, col, str(exc)))
                     done    = row * self.steps_in_width + col + 1
@@ -1081,7 +1152,10 @@ class PatchifyDialog(QDialog):
                         break
                     row, col = futures[future]
                     try:
-                        self.list_of_saved_names.extend(future.result())
+                        names, skip = future.result()
+                        self.list_of_saved_names.extend(names)
+                        if skip == 'nodata':         n_skip_nodata += 1
+                        elif skip == 'noforeground': n_skip_nofg   += 1
                     except Exception as exc:
                         tile_errors.append((row, col, str(exc)))
                     done_count += 1
@@ -1122,8 +1196,21 @@ class PatchifyDialog(QDialog):
         if total_pct == 100:
             self._split_dataset(mask_enabled, total_img_path, total_mask_path)
 
+        total_elapsed = time.monotonic() - t_start
         self.progress_bar.setValue(0)
-        self.progress_label.setText('All done!')
+        self.progress_label.setText(
+            f'Done — {len(self.list_of_saved_names):,} tiles saved  |  {_fmt_seconds(total_elapsed)}'
+        )
+
+        lines = [
+            f'Tiles saved:               {len(self.list_of_saved_names):,}',
+            f'Skipped (nodata):          {n_skip_nodata:,}',
+            f'Skipped (no foreground):   {n_skip_nofg:,}',
+        ]
+        if tile_errors:
+            lines.append(f'Failed (errors):           {len(tile_errors):,}')
+        lines.append(f'Total time:                {_fmt_seconds(total_elapsed)}')
+        QMessageBox.information(self, 'Patching complete', '\n'.join(lines))
         QApplication.processEvents()
 
     def _split_dataset(self, mask_enabled, total_img_path, total_mask_path):
